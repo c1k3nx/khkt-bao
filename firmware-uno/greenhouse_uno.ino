@@ -1,5 +1,5 @@
 /*******************************************************************************
- * GREENHOUSE UNO R3 FIRMWARE - v1.3 ENHANCEMENT
+ * GREENHOUSE UNO R3 FIRMWARE - v1.3.2 STABILITY FIX
  * ============================================================================
  * Chức năng:
  * - Đọc cảm biến: BH1750, JSN-SR04T, MQ-3, Flame, Sound, Soil moisture
@@ -20,6 +20,11 @@
  * - Screen 2: Flame, Sound
  * - Screen 3: Gas MQ3, Water Tank
  * - Screen 4: GPS coordinates
+ *
+ * BUGFIX v1.3.2: LCD flicker prevention
+ * - Only clears LCD when screen actually changes (not every 1 second)
+ * - Reduces flicker and improves readability
+ * - Tracks previous screen to detect changes
  *
  * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
  * - AltSoftSerial: D8 (RX) ← ESP8266 TX, D9 (TX) → ESP8266 RX (115200 baud)
@@ -149,7 +154,8 @@ unsigned long lastScreenSwitch = 0;  // v1.3: Screen rotation timer
 
 bool uartConnected = true;
 int uartErrorCount = 0;
-int currentScreen = 0;  // v1.3: Current LCD screen (0-4)
+int currentScreen = 0;         // v1.3: Current LCD screen (0-4)
+int previousScreen = -1;       // v1.3.2: Track screen changes
 
 // LCD queue
 struct LcdMessage {
@@ -189,7 +195,7 @@ void setup() {
   lcd.setCursor(0, 0);
   lcd.print("GREENHOUSE UNO");
   lcd.setCursor(0, 1);
-  lcd.print("v1.3 ENHANCE");
+  lcd.print("v1.3.2 STABLE");
   delay(1000);
 
   // v1.3: Initialize sensor data
@@ -235,7 +241,7 @@ void setup() {
 
   // Hardware Serial for debugging (optional, can be removed)
   Serial.begin(115200);
-  Serial.println("Greenhouse UNO v1.3 ENHANCEMENT");
+  Serial.println("Greenhouse UNO v1.3.2 STABILITY FIX");
 
   delay(1000);
   lcd.clear();
@@ -516,24 +522,32 @@ void updateLcd() {
     LcdMessage& msg = lcdQueue[lcdQueueHead];
     if (now < msg.showUntil) {
       // Show queued message
-      lcd.clear();
+      if (!lcdShowingSensor) {
+        // Entering queue mode, clear once
+        lcd.clear();
+      }
       lcd.setCursor(0, 0);
       lcd.print(msg.line1);
       lcd.setCursor(0, 1);
       lcd.print(msg.line2);
       lcdShowingSensor = false;
+      previousScreen = -1;  // Reset screen tracking
       return;
     } else {
       // Message expired
       lcdQueueHead = (lcdQueueHead + 1) % LCD_QUEUE_SIZE;
       lcdShowingSensor = true;
-      lcd.clear();  // Clear before showing sensor data
+      previousScreen = -1;  // Force clear on next screen
     }
   }
 
   // Show sensor data - rotate through screens
   if (lcdShowingSensor) {
-    lcd.clear();  // Always clear to prevent text corruption
+    // v1.3.2: Only clear when screen changes (prevent flicker)
+    if (currentScreen != previousScreen) {
+      lcd.clear();
+      previousScreen = currentScreen;
+    }
 
     switch (currentScreen) {
       case 0:  // Screen 0: Temperature & Humidity

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * GREENHOUSE ESP8266 FIRMWARE - v1.3.1 RELAY ENHANCEMENT
+ * GREENHOUSE ESP8266 FIRMWARE - v1.3.2 STABILITY FIX
  * ============================================================================
  * Chức năng:
  * - MQTT Bridge: Subscribe commands, publish sensor/status
@@ -23,6 +23,11 @@
  * - Fan relay on GPIO5 (D1) - replaces PCF8574 requirement
  * - AuxFan relay on GPIO16 (D0) - direct MQTT control
  * - Eliminates need for I2C relay expander on UNO
+ *
+ * BUGFIX v1.3.2: Critical control flow fix
+ * - Fan/AuxFan commands no longer forwarded to UNO (handled locally only)
+ * - Prevents UNO from receiving unsupported device commands
+ * - Ensures proper MQTT status publishing for fan/auxFan
  *
  * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
  * - DHT11: GPIO4 (D2) - Temperature & Humidity sensor
@@ -161,8 +166,9 @@ bool ledAlertPhase = false;
 void setup() {
   // Hardware UART for debugging (optional)
   Serial.begin(115200);
-  Serial.println("\nGreenhouse ESP8266 v1.3.1 RELAY ENHANCEMENT");
+  Serial.println("\nGreenhouse ESP8266 v1.3.2 STABILITY FIX");
   Serial.println("DHT11 on GPIO4, Fan/AuxFan relays on GPIO5/GPIO16");
+  Serial.println("BUGFIX: Fan/AuxFan no longer forwarded to UNO");
   delay(100);
 
   // Init DHT11 sensor (NEW in v1.2)
@@ -378,6 +384,10 @@ void handleDeviceCommand(String device, String action) {
     digitalWrite(RELAY_FAN, state ? RELAY_ON : RELAY_OFF);
     Serial.print("Fan relay: ");
     Serial.println(state ? "ON" : "OFF");
+
+    // v1.3.2: Publish status directly, don't send to UNO
+    mqtt.publish("greenhouse/status/fan", action.c_str(), true);
+    return;  // ← FIX: Don't forward to UNO!
   }
   else if (device == "auxFan") {
     deviceState.auxfan = action;
@@ -386,6 +396,10 @@ void handleDeviceCommand(String device, String action) {
     digitalWrite(RELAY_AUXFAN, state ? RELAY_ON : RELAY_OFF);
     Serial.print("AuxFan relay: ");
     Serial.println(state ? "ON" : "OFF");
+
+    // v1.3.2: Publish status directly, don't send to UNO
+    mqtt.publish("greenhouse/status/auxFan", action.c_str(), true);
+    return;  // ← FIX: Don't forward to UNO!
   }
   else if (device == "mainGrowLight") deviceState.light12v = action;
   else if (device == "window1") deviceState.window = action;
