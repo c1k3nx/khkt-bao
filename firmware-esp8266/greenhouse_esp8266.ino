@@ -620,33 +620,51 @@ void readGps() {
 }
 
 // ==================== MQTT PUBLISH ====================
+// v1.4 Phase 4: Standardized JSON with timestamp and units
+void publishSensor(const char* name, float value, const char* unit) {
+  if (!mqtt.connected()) return;
+
+  StaticJsonDocument<128> doc;
+  doc["v"] = value;
+  doc["u"] = unit;
+  doc["t"] = millis();  // Timestamp in milliseconds
+
+  String json;
+  serializeJson(doc, json);
+
+  String topic = "greenhouse/data/";
+  topic += name;
+  mqtt.publish(topic.c_str(), json.c_str());
+}
+
 void publishSensorData() {
   if (!mqtt.connected()) return;
 
-  // Publish to greenhouse/data/* topics (matches mqtt-schema.json)
+  // v1.4 Phase 4: Publish with standardized format (value, unit, timestamp)
   if (sensorData.temp_c > -500) {
-    mqtt.publish("greenhouse/data/temperature", String(sensorData.temp_c, 1).c_str());
+    publishSensor("temperature", sensorData.temp_c, "°C");
   }
 
   if (sensorData.hum_pct > -500) {
-    mqtt.publish("greenhouse/data/humidity", String(sensorData.hum_pct, 1).c_str());
+    publishSensor("humidity", sensorData.hum_pct, "%");
   }
 
-  mqtt.publish("greenhouse/data/soilMoisture", String(sensorData.soil_pct, 1).c_str());
-  mqtt.publish("greenhouse/data/lightIntensity", String((int)sensorData.light_lux).c_str());
-  mqtt.publish("greenhouse/data/waterTankLevel", String((int)sensorData.distance_cm).c_str());
-  mqtt.publish("greenhouse/data/gasMQ3", String(sensorData.mq3 * 5.0 / 1023.0, 2).c_str());
-  mqtt.publish("greenhouse/data/flameAnalog", String(sensorData.flame).c_str());
-  mqtt.publish("greenhouse/data/soundLevel", String(sensorData.sound).c_str());
+  publishSensor("soilMoisture", sensorData.soil_pct, "%");
+  publishSensor("lightIntensity", sensorData.light_lux, "lux");
+  publishSensor("waterTankLevel", sensorData.distance_cm, "cm");
+  publishSensor("gasMQ3", sensorData.mq3 * 5.0 / 1023.0, "V");
+  publishSensor("flameAnalog", (float)sensorData.flame, "raw");
+  publishSensor("soundLevel", (float)sensorData.sound, "raw");
 
-  // Rain sensor (placeholder)
+  // Rain sensor (placeholder) - using simple string for now
   mqtt.publish("greenhouse/data/rainSensor", "NOT_DETECTED");
 
-  // GPS (if valid)
+  // GPS (if valid) - kept as nested JSON for lat/lng
   if (sensorData.gps_valid) {
     StaticJsonDocument<128> gpsDoc;
     gpsDoc["lat"] = sensorData.gps_lat;
     gpsDoc["lng"] = sensorData.gps_lng;
+    gpsDoc["t"] = millis();  // Add timestamp
 
     String gpsJson;
     serializeJson(gpsDoc, gpsJson);
