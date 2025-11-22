@@ -187,6 +187,10 @@ LedState ledState = {"OFF", 0, 255, 0};  // Ring #2 only
 unsigned long ledAnimationTick = 0;
 bool ledAlertPhase = false;
 
+// v1.4 Phase 6: Track previous LED state to avoid unnecessary Show() calls
+RgbColor lastLedColor(0, 0, 0);
+bool ledNeedsUpdate = false;
+
 // ==================== SETUP ====================
 void setup() {
   // Init UART with UNO (Hardware Serial - v1.4)
@@ -741,30 +745,34 @@ void publishError(const char* code, const char* msg) {
 }
 
 // ==================== LED WS2812 ====================
+// v1.4 Phase 6: Optimized to only Show() when color actually changes
 void updateLedAnimations() {
   unsigned long now = millis();
 
   if (now - ledAnimationTick < 100) return;  // Update every 100ms
   ledAnimationTick = now;
 
+  RgbColor newColor(0, 0, 0);
+
   // Ring #2 only (Ring #1 is on UNO)
   if (ledState.mode == "OFF") {
-    for (int i = 0; i < LED_COUNT; i++) {
-      ring2.SetPixelColor(i, RgbColor(0, 0, 0));
-    }
+    newColor = RgbColor(0, 0, 0);
   } else if (ledState.mode == "COLOR") {
-    for (int i = 0; i < LED_COUNT; i++) {
-      ring2.SetPixelColor(i, RgbColor(ledState.r, ledState.g, ledState.b));
-    }
+    newColor = RgbColor(ledState.r, ledState.g, ledState.b);
   } else if (ledState.mode == "ALERT") {
     ledAlertPhase = !ledAlertPhase;
     uint8_t brightness = ledAlertPhase ? 255 : 50;
-    for (int i = 0; i < LED_COUNT; i++) {
-      ring2.SetPixelColor(i, RgbColor(brightness, 0, 0));  // Red blink
-    }
+    newColor = RgbColor(brightness, 0, 0);  // Red blink
   }
 
-  ring2.Show();
+  // Only update if color changed (v1.4 Phase 6 optimization)
+  if (newColor.R != lastLedColor.R || newColor.G != lastLedColor.G || newColor.B != lastLedColor.B) {
+    for (int i = 0; i < LED_COUNT; i++) {
+      ring2.SetPixelColor(i, newColor);
+    }
+    ring2.Show();  // Only show when color actually changed
+    lastLedColor = newColor;
+  }
 }
 
 void parseColor(String hexColor, uint8_t& r, uint8_t& g, uint8_t& b) {
