@@ -1,16 +1,25 @@
 /*******************************************************************************
- * GREENHOUSE UNO R3 FIRMWARE - v1.2 BUGFIX
+ * GREENHOUSE UNO R3 FIRMWARE - v1.3 ENHANCEMENT
  * ============================================================================
  * Chức năng:
  * - Đọc cảm biến: BH1750, JSN-SR04T, MQ-3, Flame, Sound, Soil moisture
  * - Điều khiển: 2 relay (direct), 2 servo, DFPlayer Mini, WS2812 Ring #1
- * - Hiển thị: LCD1602 I2C
+ * - Hiển thị: LCD1602 I2C multi-screen rotation (ALL sensors)
  * - Giao tiếp: AltSoftSerial 115200 baud với ESP8266 (JSON protocol)
  * - Fallback an toàn khi mất kết nối
  *
  * BUGFIX v1.2: DHT11 removed from UNO (moved to ESP8266 GPIO4)
  * - Fixes D13 pin conflict between DHT11 and WS2812
  * - Temperature/Humidity now read by ESP8266 and forwarded via UART
+ *
+ * ENHANCEMENT v1.3: LCD multi-screen rotation + Data sync from ESP8266
+ * - Receives temp/humidity/GPS from ESP8266 via UART "env" message
+ * - LCD rotates through 5 screens showing ALL sensors without text corruption
+ * - Screen 0: Temperature, Humidity
+ * - Screen 1: Soil Moisture, Light Intensity
+ * - Screen 2: Flame, Sound
+ * - Screen 3: Gas MQ3, Water Tank
+ * - Screen 4: GPS coordinates
  *
  * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
  * - AltSoftSerial: D8 (RX) ← ESP8266 TX, D9 (TX) → ESP8266 RX (115200 baud)
@@ -88,6 +97,10 @@
 #define LCD_QUEUE_SIZE 5
 #define LCD_MSG_DURATION 1000
 
+// LCD multi-screen rotation (v1.3)
+#define LCD_SCREEN_COUNT 5
+#define LCD_SCREEN_INTERVAL 3000  // 3 seconds per screen
+
 // ==================== OBJECTS ====================
 // DHT dht(DHT_PIN, DHT_TYPE);  // REMOVED - now on ESP8266
 BH1750 lightMeter(0x23);
@@ -100,7 +113,14 @@ Adafruit_NeoPixel strip(WS2812_COUNT, WS2812_PIN, NEO_GRB + NEO_KHZ800);
 
 // ==================== GLOBAL STATE ====================
 struct SensorData {
-  // temp_c and hum_pct removed - now read by ESP8266
+  // v1.3: temp/humidity/GPS received from ESP8266 for LCD display only
+  float temp_c;       // From ESP8266 DHT11
+  float hum_pct;      // From ESP8266 DHT11
+  float gps_lat;      // From ESP8266 GPS
+  float gps_lng;      // From ESP8266 GPS
+  bool gps_valid;     // GPS fix status
+
+  // Sensors read locally by UNO
   float soil_pct;
   float light_lux;
   int mq3;
@@ -125,9 +145,11 @@ unsigned long lastSensorSend = 0;
 unsigned long lastUartCheck = 0;
 unsigned long lastLcdUpdate = 0;
 unsigned long lastWatchdog = 0;
+unsigned long lastScreenSwitch = 0;  // v1.3: Screen rotation timer
 
 bool uartConnected = true;
 int uartErrorCount = 0;
+int currentScreen = 0;  // v1.3: Current LCD screen (0-4)
 
 // LCD queue
 struct LcdMessage {
@@ -167,8 +189,15 @@ void setup() {
   lcd.setCursor(0, 0);
   lcd.print("GREENHOUSE UNO");
   lcd.setCursor(0, 1);
-  lcd.print("v1.2 BUGFIX");
+  lcd.print("v1.3 ENHANCE");
   delay(1000);
+
+  // v1.3: Initialize sensor data
+  sensors.temp_c = 0;
+  sensors.hum_pct = 0;
+  sensors.gps_lat = 0;
+  sensors.gps_lng = 0;
+  sensors.gps_valid = false;
 
   // DHT init removed - now on ESP8266
   // dht.begin();
@@ -206,7 +235,7 @@ void setup() {
 
   // Hardware Serial for debugging (optional, can be removed)
   Serial.begin(115200);
-  Serial.println("Greenhouse UNO v1.1 FINAL");
+  Serial.println("Greenhouse UNO v1.3 ENHANCEMENT");
 
   delay(1000);
   lcd.clear();
@@ -252,6 +281,12 @@ void loop() {
   if (now - lastLcdUpdate >= 1000) {
     lastLcdUpdate = now;
     updateLcd();
+  }
+
+  // v1.3: Switch LCD screen every 3 seconds
+  if (lcdShowingSensor && now - lastScreenSwitch >= LCD_SCREEN_INTERVAL) {
+    lastScreenSwitch = now;
+    currentScreen = (currentScreen + 1) % LCD_SCREEN_COUNT;
   }
 
   // Emergency checks (always active)
@@ -343,6 +378,10 @@ void handleUartCommand() {
   if (strcmp(type, "control") == 0) {
     handleControlCommand(doc);
   }
+  else if (strcmp(type, "env") == 0) {
+    // v1.3: Handle environment data from ESP8266
+    handleEnvData(doc);
+  }
 }
 
 void handleControlCommand(JsonDocument& doc) {
@@ -393,6 +432,38 @@ void setRelay(int pin, bool state) {
   digitalWrite(pin, state ? RELAY_ON : RELAY_OFF);
 }
 
+// ==================== ENVIRONMENT DATA FROM ESP8266 (v1.3) ====================
+void handleEnvData(JsonDocument& doc) {
+  // Parse temp/humidity/GPS from ESP8266
+  if (doc.containsKey("temp")) {
+    String temp = doc["temp"];
+    sensors.temp_c = temp.toFloat();
+  }
+
+  if (doc.containsKey("hum")) {
+    String hum = doc["hum"];
+    sensors.hum_pct = hum.toFloat();
+  }
+
+  if (doc.containsKey("gps_valid")) {
+    sensors.gps_valid = doc["gps_valid"];
+
+    if (sensors.gps_valid && doc.containsKey("gps_lat") && doc.containsKey("gps_lng")) {
+      String lat = doc["gps_lat"];
+      String lng = doc["gps_lng"];
+      sensors.gps_lat = lat.toFloat();
+      sensors.gps_lng = lng.toFloat();
+    }
+  }
+
+  // Debug log
+  Serial.print("Env data from ESP: T=");
+  Serial.print(sensors.temp_c, 1);
+  Serial.print("°C H=");
+  Serial.print(sensors.hum_pct, 1);
+  Serial.println("%");
+}
+
 // ==================== DFPLAYER ====================
 void initDFPlayer() {
   // Simple init sequence
@@ -436,10 +507,11 @@ void pushLcdMessage(String line1, String line2) {
   lcdQueueTail = next;
 }
 
+// ==================== LCD MULTI-SCREEN (v1.3) ====================
 void updateLcd() {
   unsigned long now = millis();
 
-  // Check queue
+  // Check queue - priority messages
   if (lcdQueueHead != lcdQueueTail) {
     LcdMessage& msg = lcdQueue[lcdQueueHead];
     if (now < msg.showUntil) {
@@ -455,26 +527,80 @@ void updateLcd() {
       // Message expired
       lcdQueueHead = (lcdQueueHead + 1) % LCD_QUEUE_SIZE;
       lcdShowingSensor = true;
+      lcd.clear();  // Clear before showing sensor data
     }
   }
 
-  // Show sensor data
+  // Show sensor data - rotate through screens
   if (lcdShowingSensor) {
-    lcd.clear();
+    lcd.clear();  // Always clear to prevent text corruption
 
-    // Line 1: SOIL:45% LUX:120
-    lcd.setCursor(0, 0);
-    lcd.print("SOIL:");
-    lcd.print((int)sensors.soil_pct);
-    lcd.print("% LX:");
-    lcd.print((int)sensors.light_lux);
+    switch (currentScreen) {
+      case 0:  // Screen 0: Temperature & Humidity
+        lcd.setCursor(0, 0);
+        lcd.print("TEMP: ");
+        lcd.print(sensors.temp_c, 1);
+        lcd.print((char)223);  // Degree symbol
+        lcd.print("C");
 
-    // Line 2: FLAME:123 SND:456
-    lcd.setCursor(0, 1);
-    lcd.print("F:");
-    lcd.print(sensors.flame);
-    lcd.print(" S:");
-    lcd.print(sensors.sound);
+        lcd.setCursor(0, 1);
+        lcd.print("HUMI: ");
+        lcd.print(sensors.hum_pct, 1);
+        lcd.print("%");
+        break;
+
+      case 1:  // Screen 1: Soil & Light
+        lcd.setCursor(0, 0);
+        lcd.print("SOIL: ");
+        lcd.print((int)sensors.soil_pct);
+        lcd.print("%");
+
+        lcd.setCursor(0, 1);
+        lcd.print("LIGHT: ");
+        lcd.print((int)sensors.light_lux);
+        lcd.print("lx");
+        break;
+
+      case 2:  // Screen 2: Flame & Sound
+        lcd.setCursor(0, 0);
+        lcd.print("FLAME: ");
+        lcd.print(sensors.flame);
+
+        lcd.setCursor(0, 1);
+        lcd.print("SOUND: ");
+        lcd.print(sensors.sound);
+        break;
+
+      case 3:  // Screen 3: Gas & Water Tank
+        lcd.setCursor(0, 0);
+        lcd.print("GAS: ");
+        lcd.print(sensors.mq3 * 5.0 / 1023.0, 2);
+        lcd.print("V");
+
+        lcd.setCursor(0, 1);
+        lcd.print("TANK: ");
+        lcd.print((int)sensors.distance_cm);
+        lcd.print("cm");
+        break;
+
+      case 4:  // Screen 4: GPS coordinates
+        lcd.setCursor(0, 0);
+        if (sensors.gps_valid) {
+          lcd.print("LAT:");
+          lcd.print(sensors.gps_lat, 4);
+        } else {
+          lcd.print("GPS: NO FIX");
+        }
+
+        lcd.setCursor(0, 1);
+        if (sensors.gps_valid) {
+          lcd.print("LNG:");
+          lcd.print(sensors.gps_lng, 4);
+        } else {
+          lcd.print("Waiting...");
+        }
+        break;
+    }
   }
 }
 

@@ -1,9 +1,9 @@
 /*******************************************************************************
- * GREENHOUSE ESP8266 FIRMWARE - v1.2 BUGFIX
+ * GREENHOUSE ESP8266 FIRMWARE - v1.3 ENHANCEMENT
  * ============================================================================
  * Chức năng:
  * - MQTT Bridge: Subscribe commands, publish sensor/status
- * - UART với UNO: SoftwareSerial 115200 baud
+ * - UART với UNO: SoftwareSerial 115200 baud (bidirectional sync)
  * - GPS NEO-6: SoftwareSerial 9600 baud
  * - DHT11: GPIO4 (Temperature/Humidity sensor)
  * - LED WS2812B Ring #2: 8 LEDs
@@ -13,6 +13,10 @@
  * BUGFIX v1.2: DHT11 moved from UNO to ESP8266 GPIO4
  * - Fixes D13 pin conflict on UNO
  * - ESP8266 now reads temp/humidity directly and publishes to MQTT
+ *
+ * ENHANCEMENT v1.3: Data synchronization ESP8266→UNO
+ * - ESP8266 sends temp/humidity/GPS to UNO for LCD multi-screen display
+ * - New UART message type "env" for environment data sync
  *
  * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
  * - DHT11: GPIO4 (D2) - Temperature & Humidity sensor
@@ -504,10 +508,40 @@ void readDht() {
     Serial.print("°C H=");
     Serial.print(hum, 1);
     Serial.println("%");
+
+    // v1.3: Send environment data to UNO for LCD display
+    sendEnvDataToUno();
   } else {
     Serial.println("DHT11 read failed!");
     // Keep previous values on read failure
   }
+}
+
+// ==================== SYNC DATA TO UNO (NEW in v1.3) ====================
+void sendEnvDataToUno() {
+  StaticJsonDocument<256> doc;
+  doc["type"] = "env";
+  doc["temp"] = String(sensorData.temp_c, 1);
+  doc["hum"] = String(sensorData.hum_pct, 1);
+
+  // Include GPS data if available
+  if (sensorData.gps_valid) {
+    doc["gps_lat"] = String(sensorData.gps_lat, 6);
+    doc["gps_lng"] = String(sensorData.gps_lng, 6);
+    doc["gps_valid"] = true;
+  } else {
+    doc["gps_valid"] = false;
+  }
+
+  serializeJson(doc, unoSerial);
+  unoSerial.println();
+
+  // Debug log
+  Serial.print("Sent env to UNO: T=");
+  Serial.print(sensorData.temp_c, 1);
+  Serial.print("°C H=");
+  Serial.print(sensorData.hum_pct, 1);
+  Serial.println("%");
 }
 
 // ==================== GPS ====================
