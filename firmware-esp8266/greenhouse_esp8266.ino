@@ -306,14 +306,14 @@ void connectMqtt() {
       // Publish initial state
       publishDeviceStatus();
       mqttReconnectAttempts = 0;
-      // Serial debug removed - will use MQTT debug in Phase 2
+      mqttDebug("MQTT connected");
       return;
     }
     attempts++;
     delay(1000);
   }
 
-  // Serial debug removed - will use MQTT debug in Phase 2
+  mqttDebug("MQTT connection failed");
 }
 
 void reconnectMqtt() {
@@ -333,7 +333,7 @@ void reconnectMqtt() {
 
     publishDeviceStatus();
     mqttReconnectAttempts = 0;
-    // Serial debug removed - will use MQTT debug in Phase 2
+    mqttDebug("MQTT reconnected");
   }
 }
 
@@ -354,7 +354,7 @@ void handleMqttCommand(String topic, String payload) {
   if (topic == "greenhouse/control/mode") {
     currentMode = payload;
     mqtt.publish("greenhouse/status/mode", payload.c_str(), true);
-    // Serial debug removed - will use MQTT debug in Phase 2
+    mqttDebug(("Mode: " + payload).c_str());
     return;
   }
 
@@ -368,7 +368,7 @@ void handleMqttCommand(String topic, String payload) {
   // Thresholds
   if (topic.startsWith("greenhouse/set/thresholds/")) {
     String param = topic.substring(26);  // After "greenhouse/set/thresholds/"
-    // Serial debug removed - will use MQTT debug in Phase 2
+    mqttDebug(("Threshold: " + param + "=" + payload).c_str());
     // Store in LittleFS or forward to UNO if needed
     return;
   }
@@ -382,7 +382,7 @@ void handleDeviceCommand(String device, String action) {
     // v1.3.1: Control Fan relay on ESP8266 GPIO5
     bool state = (action == "ON");
     digitalWrite(RELAY_FAN, state ? RELAY_ON : RELAY_OFF);
-    // Serial debug removed - will use MQTT debug in Phase 2
+    mqttDebug(("Fan: " + action).c_str());
 
     // v1.3.2: Publish status directly, don't send to UNO
     mqtt.publish("greenhouse/status/fan", action.c_str(), true);
@@ -393,7 +393,7 @@ void handleDeviceCommand(String device, String action) {
     // v1.3.1: Control AuxFan relay on ESP8266 GPIO16
     bool state = (action == "ON");
     digitalWrite(RELAY_AUXFAN, state ? RELAY_ON : RELAY_OFF);
-    // Serial debug removed - will use MQTT debug in Phase 2
+    mqttDebug(("AuxFan: " + action).c_str());
 
     // v1.3.2: Publish status directly, don't send to UNO
     mqtt.publish("greenhouse/status/auxFan", action.c_str(), true);
@@ -425,7 +425,7 @@ void handleDeviceCommand(String device, String action) {
   String statusTopic = "greenhouse/status/" + device;
   mqtt.publish(statusTopic.c_str(), action.c_str(), true);
 
-  // Serial debug removed - will use MQTT debug in Phase 2
+  mqttDebug((device + ": " + action).c_str());
 }
 
 // ==================== UART WITH UNO ====================
@@ -440,7 +440,7 @@ void handleUartFromUno() {
 
   if (error) {
     uartErrorCount++;
-    // Serial debug removed - will use MQTT debug in Phase 2
+    mqttDebug("UART parse error");
     publishError("uart_parse_error", "Invalid JSON from UNO");
     return;
   }
@@ -453,6 +453,9 @@ void handleUartFromUno() {
     // ACK received - Serial debug removed
   } else if (strcmp(type, "event") == 0) {
     handleEventFromUno(doc);
+  } else if (strcmp(type, "debug") == 0) {
+    // v1.4 Phase 2: Handle debug message from UNO
+    handleDebugFromUno(doc);
   }
 }
 
@@ -490,7 +493,7 @@ void handleSensorData(JsonDocument& doc) {
 
   // Data received, reset error count
   uartErrorCount = 0;
-  // Serial debug removed - will use MQTT debug in Phase 2
+  // mqttDebug("Sensor data received");  // Too verbose, comment out
 }
 
 void handleEventFromUno(JsonDocument& doc) {
@@ -504,7 +507,11 @@ void handleEventFromUno(JsonDocument& doc) {
   topic += event;
   mqtt.publish(topic.c_str(), value);
 
-  // Serial debug removed - will use MQTT debug in Phase 2
+  String debugMsg = "Event: ";
+  debugMsg += event;
+  debugMsg += "=";
+  debugMsg += value;
+  mqttDebug(debugMsg.c_str());
 
   // Handle fire alert with LED
   if (strcmp(event, "flame") == 0 && strcmp(value, "DETECTED") == 0) {
@@ -533,6 +540,29 @@ void sendCommandToUno(String device, String action) {
   // Serial debug removed - unoSerial IS Serial now
 }
 
+// ==================== MQTT DEBUG SYSTEM (v1.4 Phase 2) ====================
+void handleDebugFromUno(JsonDocument& doc) {
+  const char* source = doc["source"];
+  const char* msg = doc["msg"];
+  unsigned long ts = doc["ts"];
+
+  if (source == NULL || msg == NULL) return;
+
+  // Forward to MQTT debug topic
+  if (mqtt.connected()) {
+    String payload = String(source) + ": " + String(msg);
+    mqtt.publish("greenhouse/sys/debug", payload.c_str());
+  }
+}
+
+void mqttDebug(const char* msg) {
+  if (!mqtt.connected()) return;
+
+  String payload = "ESP8266: ";
+  payload += msg;
+  mqtt.publish("greenhouse/sys/debug", payload.c_str());
+}
+
 // ==================== DHT11 SENSOR (NEW in v1.2) ====================
 void readDht() {
   float temp = dht.readTemperature();
@@ -541,12 +571,12 @@ void readDht() {
   if (!isnan(temp) && !isnan(hum)) {
     sensorData.temp_c = temp;
     sensorData.hum_pct = hum;
-    // Serial debug removed - will use MQTT debug in Phase 2
+    // mqttDebug("DHT11 read OK");  // Too verbose, comment out
 
     // v1.3: Send environment data to UNO for LCD display
     sendEnvDataToUno();
   } else {
-    // DHT11 read failed - Serial debug removed
+    mqttDebug("DHT11 read failed");
     // Keep previous values on read failure
   }
 }
@@ -570,7 +600,7 @@ void sendEnvDataToUno() {
   serializeJson(doc, unoSerial);
   unoSerial.println();
 
-  // Serial debug removed - will use MQTT debug in Phase 2
+  // mqttDebug("Env data sent to UNO");  // Too verbose, comment out
 }
 
 // ==================== GPS ====================
@@ -665,7 +695,11 @@ void publishError(const char* code, const char* msg) {
   serializeJson(doc, json);
   mqtt.publish("greenhouse/event/error", json.c_str());
 
-  // Serial debug removed - will use MQTT debug in Phase 2
+  String debugMsg = "Error: ";
+  debugMsg += code;
+  debugMsg += " - ";
+  debugMsg += msg;
+  mqttDebug(debugMsg.c_str());
 }
 
 // ==================== LED WS2812 ====================

@@ -113,6 +113,10 @@
 #define LCD_SCREEN_COUNT 5
 #define LCD_SCREEN_INTERVAL 3000  // 3 seconds per screen
 
+// Debug via MQTT (v1.4 Phase 2)
+#define DEBUG_BUFFER_SIZE 256
+#define DEBUG_SEND_INTERVAL 100  // Minimum interval between debug messages
+
 // ==================== OBJECTS ====================
 // DHT dht(DHT_PIN, DHT_TYPE);  // REMOVED - now on ESP8266
 BH1750 lightMeter(0x23);
@@ -180,6 +184,11 @@ bool lcdShowingSensor = true;
 int currentVolume = 25;
 bool dfPlayerReady = false;
 
+// Debug buffer (v1.4 Phase 2)
+char debugBuffer[DEBUG_BUFFER_SIZE];
+bool debugPending = false;
+unsigned long lastDebugSend = 0;
+
 // ==================== SETUP ====================
 void setup() {
   // Init pins
@@ -220,6 +229,7 @@ void setup() {
   if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
     lcd.setCursor(0, 1);
     lcd.print("BH1750 OK       ");
+    // Debug will be sent after Serial init
   } else {
     lcd.setCursor(0, 1);
     lcd.print("BH1750 ERROR!   ");
@@ -248,8 +258,11 @@ void setup() {
   // v1.4: Using Hardware Serial - NO debug Serial available
   Serial.begin(UART_BAUD);  // Serial = espSerial for ESP8266 communication
 
-  // NOTE: Serial debug removed - use MQTT debug instead
-  // See Phase 2 for MQTT debug implementation
+  // v1.4 Phase 2: MQTT debug system ready
+  delay(500);  // Wait for ESP8266 to be ready
+  mqttDebug("UNO v1.4 started");
+  mqttDebug("BH1750 init OK");
+  mqttDebug("Hardware Serial D0/D1 ready");
 
   delay(1000);
   lcd.clear();
@@ -305,6 +318,12 @@ void loop() {
 
   // Emergency checks (always active)
   emergencyChecks();
+
+  // Send debug message if pending (v1.4 Phase 2)
+  if (debugPending && (now - lastDebugSend >= DEBUG_SEND_INTERVAL)) {
+    lastDebugSend = now;
+    sendDebugMessage();
+  }
 
   delay(10);
 }
@@ -370,6 +389,28 @@ void sendSensorData() {
   // Debug Serial removed - espSerial IS Serial now
 }
 
+// ==================== MQTT DEBUG SYSTEM (v1.4 Phase 2) ====================
+void mqttDebug(const char* msg) {
+  strncpy(debugBuffer, msg, DEBUG_BUFFER_SIZE - 1);
+  debugBuffer[DEBUG_BUFFER_SIZE - 1] = '\0';  // Ensure null termination
+  debugPending = true;
+}
+
+void sendDebugMessage() {
+  if (!debugPending) return;
+
+  StaticJsonDocument<256> doc;
+  doc["type"] = "debug";
+  doc["source"] = "UNO";
+  doc["msg"] = debugBuffer;
+  doc["ts"] = millis();
+
+  serializeJson(doc, espSerial);
+  espSerial.println();
+
+  debugPending = false;
+}
+
 void handleUartCommand() {
   String line = espSerial.readStringUntil('\n');
   line.trim();
@@ -381,7 +422,7 @@ void handleUartCommand() {
 
   if (error) {
     uartErrorCount++;
-    // Serial debug removed - will use MQTT debug in Phase 2
+    mqttDebug("UART parse error");
     return;
   }
 
@@ -467,7 +508,8 @@ void handleEnvData(JsonDocument& doc) {
     }
   }
 
-  // Debug log removed - will use MQTT debug in Phase 2
+  // v1.4 Phase 2: MQTT debug
+  mqttDebug("Env data received from ESP");
 }
 
 // ==================== DFPLAYER ====================
@@ -665,7 +707,7 @@ void emergencyChecks() {
     serializeJson(doc, espSerial);
     espSerial.println();
 
-    // Serial debug removed - will use MQTT debug in Phase 2
+    mqttDebug("FLAME DETECTED!");
   }
 
   // Sound alert (debounce: once per second)
@@ -680,6 +722,6 @@ void emergencyChecks() {
     serializeJson(doc, espSerial);
     espSerial.println();
 
-    // Serial debug removed - will use MQTT debug in Phase 2
+    mqttDebug("LOUD SOUND detected");
   }
 }
