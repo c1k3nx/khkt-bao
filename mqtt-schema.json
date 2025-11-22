@@ -1,0 +1,345 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IoT Greenhouse MQTT Schema",
+  "description": "Standardized MQTT topics and payload schemas for greenhouse system",
+  "version": "1.0.0",
+  "topics": {
+    "sensor": {
+      "prefix": "greenhouse/data/",
+      "qos": 0,
+      "retain": false,
+      "topics": {
+        "temperature": {
+          "type": "string",
+          "pattern": "^-?\\d+\\.\\d+$",
+          "unit": "°C",
+          "example": "26.5"
+        },
+        "humidity": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+$",
+          "unit": "%RH",
+          "example": "68.0"
+        },
+        "soilMoisture": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+$",
+          "unit": "%",
+          "example": "47.0"
+        },
+        "lightIntensity": {
+          "type": "string",
+          "pattern": "^\\d+$",
+          "unit": "lux",
+          "example": "320"
+        },
+        "rainSensor": {
+          "type": "string",
+          "enum": ["DETECTED", "NOT_DETECTED"],
+          "example": "NOT_DETECTED"
+        },
+        "waterTankLevel": {
+          "type": "string",
+          "pattern": "^\\d+$",
+          "unit": "%",
+          "example": "78"
+        },
+        "gasMQ3": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+$",
+          "unit": "V",
+          "example": "0.62"
+        },
+        "soundLevel": {
+          "type": "string",
+          "pattern": "^\\d+$",
+          "unit": "ADC",
+          "range": "0-1023",
+          "example": "512"
+        },
+        "flameAnalog": {
+          "type": "string",
+          "pattern": "^\\d+$",
+          "unit": "ADC",
+          "range": "0-1023",
+          "example": "256"
+        },
+        "rtcTime": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}$",
+          "example": "2025-11-23T22:15:31"
+        }
+      }
+    },
+    "events": {
+      "prefix": "greenhouse/event/",
+      "qos": 1,
+      "retain": false,
+      "topics": {
+        "sound": {
+          "type": "string",
+          "enum": ["LOUD", "NORMAL"],
+          "example": "LOUD"
+        },
+        "flame": {
+          "type": "string",
+          "enum": ["DETECTED", "NORMAL"],
+          "example": "DETECTED"
+        },
+        "smoke": {
+          "type": "string",
+          "enum": ["HIGH", "NORMAL"],
+          "example": "HIGH"
+        },
+        "doorButton": {
+          "type": "string",
+          "enum": ["PRESS"],
+          "example": "PRESS"
+        }
+      }
+    },
+    "status": {
+      "prefix": "greenhouse/status/",
+      "qos": 1,
+      "retain": true,
+      "topics": {
+        "fan": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "ON"
+        },
+        "auxFan": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "OFF"
+        },
+        "pump": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "ON"
+        },
+        "mainGrowLight": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "ON"
+        },
+        "rgbLed": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "ON"
+        },
+        "rgbColor": {
+          "type": "string",
+          "pattern": "^\\d+,\\d+,\\d+$",
+          "example": "255,128,0"
+        },
+        "mainDoor": {
+          "type": "string",
+          "enum": ["OPEN", "CLOSED"],
+          "example": "CLOSED"
+        },
+        "window1": {
+          "type": "string",
+          "enum": ["OPEN", "CLOSED"],
+          "example": "OPEN"
+        },
+        "window2": {
+          "type": "string",
+          "enum": ["OPEN", "CLOSED"],
+          "example": "CLOSED"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["AUTO", "MANUAL"],
+          "example": "AUTO"
+        },
+        "plantTalk": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "ON"
+        }
+      }
+    },
+    "control": {
+      "prefix": "greenhouse/control/",
+      "qos": 1,
+      "retain": false,
+      "topics": {
+        "mode": {
+          "type": "string",
+          "enum": ["AUTO", "MANUAL"],
+          "example": "AUTO"
+        },
+        "plantTalk": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "ON"
+        },
+        "fan": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "ON"
+        },
+        "auxFan": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "OFF"
+        },
+        "pump": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "ON"
+        },
+        "mainGrowLight": {
+          "type": "string",
+          "enum": ["ON", "OFF"],
+          "example": "ON"
+        },
+        "mainDoor": {
+          "type": "string",
+          "enum": ["OPEN", "CLOSE"],
+          "example": "OPEN"
+        },
+        "window1": {
+          "type": "string",
+          "enum": ["OPEN", "CLOSE"],
+          "example": "CLOSE"
+        },
+        "window2": {
+          "type": "string",
+          "enum": ["OPEN", "CLOSE"],
+          "example": "CLOSE"
+        },
+        "rgbLed": {
+          "type": "string",
+          "pattern": "^(\\d+,\\d+,\\d+|OFF)$",
+          "example": "255,128,0"
+        }
+      }
+    },
+    "thresholds": {
+      "prefix": "greenhouse/set/thresholds/",
+      "qos": 1,
+      "retain": true,
+      "topics": {
+        "temperatureHigh": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 60,
+          "example": 35.0
+        },
+        "temperatureLow": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 60,
+          "example": 15.0
+        },
+        "humidityHigh": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "example": 85.0
+        },
+        "humidityLow": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "example": 40.0
+        },
+        "soilMoistureTarget": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "example": 50.0
+        },
+        "soilMoistureLow": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "example": 30.0
+        },
+        "lightIntensityLow": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000,
+          "example": 150
+        },
+        "lightIntensityVeryLow": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000,
+          "example": 50
+        }
+      }
+    },
+    "vision": {
+      "prefix": "greenhouse/cam/",
+      "qos": 0,
+      "retain": false,
+      "topics": {
+        "detections": {
+          "type": "object",
+          "required": ["ts", "plant_count", "unhealthy_count", "bboxes", "model_ver"],
+          "properties": {
+            "ts": {
+              "type": "integer",
+              "description": "Unix timestamp",
+              "example": 1732395231
+            },
+            "plant_count": {
+              "type": "integer",
+              "minimum": 0,
+              "example": 12
+            },
+            "unhealthy_count": {
+              "type": "integer",
+              "minimum": 0,
+              "example": 2
+            },
+            "bboxes": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                },
+                "minItems": 4,
+                "maxItems": 4
+              },
+              "example": [[10, 20, 100, 150], [200, 50, 280, 180]]
+            },
+            "model_ver": {
+              "type": "string",
+              "example": "yolov8n-plants-v1.2"
+            }
+          }
+        },
+        "health": {
+          "type": ["string", "object"],
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": ["OK"],
+              "example": "OK"
+            },
+            {
+              "type": "object",
+              "required": ["plant_id", "suspected"],
+              "properties": {
+                "plant_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "example": 3
+                },
+                "suspected": {
+                  "type": "string",
+                  "example": "leaf_blight"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
