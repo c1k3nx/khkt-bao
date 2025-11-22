@@ -1,5 +1,5 @@
 /*******************************************************************************
- * GREENHOUSE ESP8266 FIRMWARE - v1.3 ENHANCEMENT
+ * GREENHOUSE ESP8266 FIRMWARE - v1.3.1 RELAY ENHANCEMENT
  * ============================================================================
  * Chức năng:
  * - MQTT Bridge: Subscribe commands, publish sensor/status
@@ -7,6 +7,7 @@
  * - GPS NEO-6: SoftwareSerial 9600 baud
  * - DHT11: GPIO4 (Temperature/Humidity sensor)
  * - LED WS2812B Ring #2: 8 LEDs
+ * - Relay control: Fan & AuxFan (moved from UNO)
  * - Config storage: LittleFS
  * - Watchdog & retry logic
  *
@@ -18,12 +19,19 @@
  * - ESP8266 sends temp/humidity/GPS to UNO for LCD multi-screen display
  * - New UART message type "env" for environment data sync
  *
+ * ENHANCEMENT v1.3.1: Fan & AuxFan relay control on ESP8266
+ * - Fan relay on GPIO5 (D1) - replaces PCF8574 requirement
+ * - AuxFan relay on GPIO16 (D0) - direct MQTT control
+ * - Eliminates need for I2C relay expander on UNO
+ *
  * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
  * - DHT11: GPIO4 (D2) - Temperature & Humidity sensor
+ * - RELAY_FAN: GPIO5 (D1) - Fan relay control (NEW v1.3.1)
+ * - RELAY_AUXFAN: GPIO16 (D0) - AuxFan relay control (NEW v1.3.1)
  * - UNO UART: GPIO12 (RX) ← UNO D9 TX, GPIO14 (TX) → UNO D8 RX (SoftwareSerial 115200)
  * - GPS: GPIO13 (RX) ← NEO-6 TX, GPIO15 (TX) → NEO-6 RX (SoftwareSerial 9600)
  * - WS2812 Ring #2: GPIO2 (D4) - 8 LEDs, NeoPixelBus UART method
- * - Reserve: GPIO1/3 (UART0 for debug), GPIO5
+ * - Reserve: GPIO1/3 (UART0 for debug)
  ******************************************************************************/
 
 #include <ESP8266WiFi.h>
@@ -64,6 +72,14 @@ const char* MQTT_CLIENT_ID = "greenhouse-esp8266";
 // WS2812 Ring #2
 #define LED_RING2_PIN 2  // GPIO2 (D4)
 #define LED_COUNT 8
+
+// Relays (v1.3.1 - moved from UNO to ESP8266)
+#define RELAY_FAN 5      // GPIO5 (D1) - Fan relay
+#define RELAY_AUXFAN 16  // GPIO16 (D0) - AuxFan relay
+
+// Relay logic (Active LOW for most relay modules)
+#define RELAY_ON LOW
+#define RELAY_OFF HIGH
 
 // Timings
 #define DHT_READ_INTERVAL 2000   // Read DHT11 every 2 seconds
@@ -145,8 +161,8 @@ bool ledAlertPhase = false;
 void setup() {
   // Hardware UART for debugging (optional)
   Serial.begin(115200);
-  Serial.println("\nGreenhouse ESP8266 v1.2 BUGFIX");
-  Serial.println("DHT11 now on GPIO4");
+  Serial.println("\nGreenhouse ESP8266 v1.3.1 RELAY ENHANCEMENT");
+  Serial.println("DHT11 on GPIO4, Fan/AuxFan relays on GPIO5/GPIO16");
   delay(100);
 
   // Init DHT11 sensor (NEW in v1.2)
@@ -167,6 +183,13 @@ void setup() {
   // Init LED Ring #2
   ring2.Begin();
   ring2.Show(); // Clear
+
+  // Init Relays (v1.3.1)
+  pinMode(RELAY_FAN, OUTPUT);
+  pinMode(RELAY_AUXFAN, OUTPUT);
+  digitalWrite(RELAY_FAN, RELAY_OFF);      // Initial state: OFF
+  digitalWrite(RELAY_AUXFAN, RELAY_OFF);   // Initial state: OFF
+  Serial.println("Relays initialized (GPIO5=FAN, GPIO16=AUXFAN)");
 
   // Init Wi-Fi
   WiFi.mode(WIFI_STA);
@@ -348,8 +371,22 @@ void handleMqttCommand(String topic, String payload) {
 void handleDeviceCommand(String device, String action) {
   // Update local state
   if (device == "pump") deviceState.pump = action;
-  else if (device == "fan") deviceState.fan = action;
-  else if (device == "auxFan") deviceState.auxfan = action;
+  else if (device == "fan") {
+    deviceState.fan = action;
+    // v1.3.1: Control Fan relay on ESP8266 GPIO5
+    bool state = (action == "ON");
+    digitalWrite(RELAY_FAN, state ? RELAY_ON : RELAY_OFF);
+    Serial.print("Fan relay: ");
+    Serial.println(state ? "ON" : "OFF");
+  }
+  else if (device == "auxFan") {
+    deviceState.auxfan = action;
+    // v1.3.1: Control AuxFan relay on ESP8266 GPIO16
+    bool state = (action == "ON");
+    digitalWrite(RELAY_AUXFAN, state ? RELAY_ON : RELAY_OFF);
+    Serial.print("AuxFan relay: ");
+    Serial.println(state ? "ON" : "OFF");
+  }
   else if (device == "mainGrowLight") deviceState.light12v = action;
   else if (device == "window1") deviceState.window = action;
   else if (device == "mainDoor") deviceState.door = action;
