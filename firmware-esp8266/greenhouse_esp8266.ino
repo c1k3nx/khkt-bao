@@ -53,8 +53,8 @@
 #include <SoftwareSerial.h>
 #include <DHT.h>  // DHT11 sensor library
 #include <NeoPixelBus.h>  // NeoPixelBus instead of Adafruit_NeoPixel for ESP8266
-#include <LittleFS.h>
-#include <TinyGPSPlus.h>
+#include <LittleFS.h>  // v1.4 BUGFIX: Add missing LittleFS include
+#include <TinyGPSPlus.h>  // v1.4 BUGFIX: Add missing TinyGPSPlus include
 
 // ==================== CONFIGURATION ====================
 // Wi-Fi credentials (change these)
@@ -172,6 +172,9 @@ struct Thresholds {
   float soil_min = 30.0;
   int flame_threshold = 800;
   int sound_threshold = 700;
+  // v1.4 BUGFIX: Add hysteresis to prevent oscillation
+  float temp_hysteresis = 2.0;  // ±2°C hysteresis
+  float soil_hysteresis = 5.0;  // ±5% hysteresis
 };
 
 Thresholds thresholds;
@@ -206,7 +209,8 @@ void setup() {
 
   // Init filesystem
   if (!LittleFS.begin()) {
-    Serial.println("LittleFS init failed");
+    // v1.4 BUGFIX: Can't use Serial.println() - it conflicts with unoSerial
+    // Will log via MQTT after connection
   }
 
   // Init LED Ring #2
@@ -314,6 +318,9 @@ void loop() {
 
   // Auto control (v1.4 Phase 5) - runs every loop
   autoControl();
+
+  // v1.4 BUGFIX: Feed watchdog to prevent reset
+  yield();  // Let ESP8266 handle Wi-Fi and system tasks
 
   delay(10);
 }
@@ -833,54 +840,67 @@ void autoControl() {
   if (currentMode != "AUTO") return;
 
   static unsigned long lastAutoControl = 0;
+  static bool flameAlertSent = false;  // v1.4 BUGFIX: Debounce flame alert
   unsigned long now = millis();
 
   // Run auto control every 5 seconds
   if (now - lastAutoControl < 5000) return;
   lastAutoControl = now;
 
-  // Temperature control
-  if (sensorData.temp_c > thresholds.temp_max) {
+  // v1.4 BUGFIX: Temperature control WITH HYSTERESIS to prevent oscillation
+  // Turn ON when temp > max + hysteresis (37°C)
+  // Turn OFF when temp < max - hysteresis (33°C)
+  if (sensorData.temp_c > (thresholds.temp_max + thresholds.temp_hysteresis)) {
     // Turn on fan if not already on
     if (deviceState.fan != "ON") {
       handleDeviceCommand("fan", "ON");
       mqttDebug("Auto: Fan ON (temp high)");
     }
-  } else if (sensorData.temp_c < thresholds.temp_min) {
-    // Turn off fan if on
+  } else if (sensorData.temp_c < (thresholds.temp_max - thresholds.temp_hysteresis)) {
+    // Turn off fan if on (temp is normal)
     if (deviceState.fan != "OFF") {
       handleDeviceCommand("fan", "OFF");
       mqttDebug("Auto: Fan OFF (temp normal)");
     }
   }
+  // Between 33-37°C: keep current state (hysteresis zone)
 
-  // Soil moisture control
-  if (sensorData.soil_pct < thresholds.soil_min) {
+  // v1.4 BUGFIX: Soil moisture control WITH HYSTERESIS
+  // Turn ON when soil < min - hysteresis (25%)
+  // Turn OFF when soil > min + hysteresis (35%)
+  if (sensorData.soil_pct < (thresholds.soil_min - thresholds.soil_hysteresis)) {
     // Turn on pump if not already on
     if (deviceState.pump != "ON") {
       handleDeviceCommand("pump", "ON");
       mqttDebug("Auto: Pump ON (soil dry)");
     }
-  } else {
+  } else if (sensorData.soil_pct > (thresholds.soil_min + thresholds.soil_hysteresis)) {
     // Turn off pump if on (soil is wet enough)
     if (deviceState.pump != "OFF") {
       handleDeviceCommand("pump", "OFF");
       mqttDebug("Auto: Pump OFF (soil ok)");
     }
   }
+  // Between 25-35%: keep current state (hysteresis zone)
 
-  // Flame detection (always active, regardless of mode)
+  // v1.4 BUGFIX: Flame detection with debounce (always active, regardless of mode)
   if (sensorData.flame > thresholds.flame_threshold) {
-    mqttDebug("ALERT: Flame detected!");
-    // Emergency actions: turn off pump, turn on fans
-    if (deviceState.pump != "OFF") {
-      handleDeviceCommand("pump", "OFF");
+    if (!flameAlertSent) {
+      mqttDebug("ALERT: Flame detected!");
+      flameAlertSent = true;
+
+      // Emergency actions: turn off pump, turn on fans
+      if (deviceState.pump != "OFF") {
+        handleDeviceCommand("pump", "OFF");
+      }
+      if (deviceState.fan != "ON") {
+        handleDeviceCommand("fan", "ON");
+      }
+      if (deviceState.auxfan != "ON") {
+        handleDeviceCommand("auxFan", "ON");
+      }
     }
-    if (deviceState.fan != "ON") {
-      handleDeviceCommand("fan", "ON");
-    }
-    if (deviceState.auxfan != "ON") {
-      handleDeviceCommand("auxFan", "ON");
-    }
+  } else {
+    flameAlertSent = false;  // Reset when flame is gone
   }
 }

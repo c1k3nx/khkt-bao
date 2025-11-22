@@ -118,7 +118,7 @@
 #define DEBUG_SEND_INTERVAL 100  // Minimum interval between debug messages
 
 // Sensor filtering (v1.4 Phase 3)
-#define ULTRASONIC_SAMPLES 5  // Median filter samples
+#define ULTRASONIC_SAMPLES 3  // v1.4 BUGFIX: Reduced from 5 to 3 (30ms vs 60ms blocking)
 #define MA_SIZE 10            // Moving average buffer size
 
 // ==================== OBJECTS ====================
