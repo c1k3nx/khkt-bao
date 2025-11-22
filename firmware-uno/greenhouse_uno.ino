@@ -380,7 +380,7 @@ void readAllSensors() {
   // Soil moisture with moving average filter (v1.4 Phase 3)
   int soilRaw = analogRead(ANALOG_SOIL);
   int soilFiltered = soilFilter.add(soilRaw);
-  sensors.soil_pct = map(soilFiltered, 0, 1023, 0, 100);
+  sensors.soil_pct = constrain(map(soilFiltered, 0, 1023, 0, 100), 0, 100);  // v1.4 BUGFIX: Clamp to 0-100%
 
   // MQ-3 with moving average filter
   int mq3Raw = analogRead(ANALOG_MQ3);
@@ -493,6 +493,8 @@ void handleUartCommand() {
   }
 
   const char* type = doc["type"];
+  if (type == NULL) return;  // v1.4 BUGFIX: Prevent NULL pointer dereference
+
   if (strcmp(type, "control") == 0) {
     handleControlCommand(doc);
   }

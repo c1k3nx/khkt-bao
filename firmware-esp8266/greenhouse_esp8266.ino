@@ -242,7 +242,7 @@ void setup() {
   // Init MQTT
   mqtt.setServer(MQTT_BROKER, MQTT_PORT);
   mqtt.setCallback(mqttCallback);
-  mqtt.setBufferSize(512);
+  mqtt.setBufferSize(1024);  // v1.4 BUGFIX: Increased from 512 to prevent message truncation
 
   connectMqtt();
 
@@ -278,9 +278,15 @@ void loop() {
     lastSensorReceived = now;
   }
 
-  // Check UART timeout
+  // Check UART timeout (v1.4 BUGFIX: Add rate limiting to prevent MQTT spam)
+  static bool timeoutErrorSent = false;
   if (now - lastSensorReceived > UART_TIMEOUT && lastSensorReceived > 0) {
-    publishError("uart_timeout", "No data from UNO for 3s");
+    if (!timeoutErrorSent) {
+      publishError("uart_timeout", "No data from UNO for 3s");
+      timeoutErrorSent = true;
+    }
+  } else {
+    timeoutErrorSent = false;
   }
 
   // Read DHT11 (NEW in v1.2)
@@ -381,11 +387,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 // ==================== MQTT COMMAND HANDLER ====================
 void handleMqttCommand(String topic, String payload) {
-  // Mode control
+  // Mode control (v1.4 BUGFIX: Add validation)
   if (topic == "greenhouse/control/mode") {
-    currentMode = payload;
-    mqtt.publish("greenhouse/status/mode", payload.c_str(), true);
-    mqttDebug(("Mode: " + payload).c_str());
+    if (payload == "AUTO" || payload == "MANUAL") {
+      currentMode = payload;
+      mqtt.publish("greenhouse/status/mode", payload.c_str(), true);
+      mqttDebug(("Mode: " + payload).c_str());
+    } else {
+      mqttDebug("Invalid mode - use AUTO or MANUAL");
+    }
     return;
   }
 
@@ -477,6 +487,7 @@ void handleUartFromUno() {
   }
 
   const char* type = doc["type"];
+  if (type == NULL) return;  // v1.4 BUGFIX: Prevent NULL pointer dereference
 
   if (strcmp(type, "sensor") == 0) {
     handleSensorData(doc);
@@ -491,6 +502,7 @@ void handleUartFromUno() {
 }
 
 void handleSensorData(JsonDocument& doc) {
+  if (!doc.containsKey("data")) return;  // v1.4 BUGFIX: Validate JSON structure
   JsonObject data = doc["data"];
 
   // Parse sensor data (format matches mqtt-schema.json)
@@ -531,7 +543,7 @@ void handleEventFromUno(JsonDocument& doc) {
   const char* event = doc["event"];
   const char* value = doc["value"];
 
-  if (event == NULL || value == NULL) return;
+  if (event == NULL || value == NULL) return;  // v1.4: NULL check already present
 
   // Publish to greenhouse/event/<event>
   String topic = "greenhouse/event/";
@@ -577,7 +589,7 @@ void handleDebugFromUno(JsonDocument& doc) {
   const char* msg = doc["msg"];
   unsigned long ts = doc["ts"];
 
-  if (source == NULL || msg == NULL) return;
+  if (source == NULL || msg == NULL) return;  // v1.4: NULL check already present
 
   // Forward to MQTT debug topic
   if (mqtt.connected()) {
