@@ -1,22 +1,26 @@
 /*******************************************************************************
- * GREENHOUSE UNO R3 FIRMWARE
+ * GREENHOUSE UNO R3 FIRMWARE - v1.1 FINAL
  * ============================================================================
  * Chức năng:
  * - Đọc cảm biến: DHT11, BH1750, JSN-SR04T, MQ-3, Flame, Sound, Soil moisture
- * - Điều khiển: 4 relay, 2 servo, DFPlayer Mini
+ * - Điều khiển: 2 relay (direct), 2 servo, DFPlayer Mini, WS2812 Ring #1
  * - Hiển thị: LCD1602 I2C
- * - Giao tiếp: UART 57600 baud với ESP8266 (JSON protocol)
+ * - Giao tiếp: AltSoftSerial 115200 baud với ESP8266 (JSON protocol)
  * - Fallback an toàn khi mất kết nối
  *
- * Pin mapping (BẮT BUỘC):
- * - UART: D0 (RX) ↔ ESP8266 TX, D1 (TX) ↔ ESP8266 RX
- * - DFPlayer: D10 (RX), D11 (TX)
- * - Servos: D9 (Window MG996R), D5 (Door MG90)
- * - JSN-SR04T: D12 (TRIG), D3 (ECHO)
- * - DHT11: D2
- * - Relays: D4 (Pump), D7 (Fan), D8 (Light12V), D13 (AuxFan)
+ * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
+ * - AltSoftSerial: D8 (RX) ← ESP8266 TX, D9 (TX) → ESP8266 RX (115200 baud)
+ * - DFPlayer: D12 (RX), D11 (TX) - SoftwareSerial 9600 baud
+ * - Servos: D6 (Window MG996R), D5 (Door MG90)
+ * - JSN-SR04T: D3 (TRIG), D2 (ECHO)
+ * - DHT11: D13 (may need to disconnect onboard LED jumper)
+ * - Relays (direct): D7 (Pump), D10 (LED 12V Grow Light)
+ * - WS2812 Ring #1: D13 (8 LEDs, shares with DHT11)
+ * - Button: D4 (Open Main Door, INPUT_PULLUP)
  * - Analog: A0 (Flame), A1 (Sound), A2 (Soil), A3 (MQ-3)
  * - I2C: A4 (SDA), A5 (SCL) - BH1750 + LCD1602
+ *
+ * NOTE: For full 4-relay control, use PCF8574 I2C expander (recommended)
  ******************************************************************************/
 
 #include <Wire.h>
@@ -24,33 +28,44 @@
 #include <DHT.h>
 #include <BH1750.h>
 #include <LiquidCrystal_I2C.h>
-#include <SoftwareSerial.h>
+#include <AltSoftSerial.h>  // D8 RX, D9 TX (fixed pins)
+#include <SoftwareSerial.h>  // For DFPlayer
+#include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 
 // ==================== CONFIGURATION ====================
-#define DHT_PIN 2
+// Sensors
+#define DHT_PIN 13
 #define DHT_TYPE DHT11
 
-#define JSN_TRIG 12
-#define JSN_ECHO 3
-
-#define RELAY_PUMP 4
-#define RELAY_FAN 7
-#define RELAY_LIGHT12V 8
-#define RELAY_AUXFAN 13
-
-#define SERVO_WINDOW 9
-#define SERVO_DOOR 5
+#define JSN_TRIG 3
+#define JSN_ECHO 2
 
 #define ANALOG_FLAME A0
 #define ANALOG_SOUND A1
 #define ANALOG_SOIL A2
 #define ANALOG_MQ3 A3
 
-#define DF_RX 10
+// Actuators - Relays (direct control)
+#define RELAY_PUMP 7
+#define RELAY_LED12V 10
+
+// Actuators - Servos
+#define SERVO_WINDOW 6
+#define SERVO_DOOR 5
+
+// DFPlayer - SoftwareSerial
+#define DF_RX 12
 #define DF_TX 11
 
-// Relay logic (adjust if needed)
+// WS2812 Ring #1
+#define WS2812_PIN 13  // Shares with DHT11 - use carefully
+#define WS2812_COUNT 8
+
+// Button
+#define BUTTON_DOOR 4
+
+// Relay logic (Active LOW)
 #define RELAY_ON LOW
 #define RELAY_OFF HIGH
 
@@ -59,8 +74,8 @@
 #define SOUND_THRESHOLD 700
 #define TEMP_SAFE_MAX 40.0
 
-// UART protocol
-#define UART_BAUD 57600
+// UART protocol with ESP8266
+#define UART_BAUD 115200
 #define UART_TIMEOUT 3000
 #define UART_RETRY 3
 
@@ -74,7 +89,9 @@ BH1750 lightMeter(0x23);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 Servo servoWindow;
 Servo servoDoor;
+AltSoftSerial espSerial;  // RX=D8, TX=D9 (fixed by library)
 SoftwareSerial dfSerial(DF_RX, DF_TX);
+Adafruit_NeoPixel strip(WS2812_COUNT, WS2812_PIN, NEO_GRB + NEO_KHZ800);
 
 // ==================== GLOBAL STATE ====================
 struct SensorData {
@@ -90,11 +107,10 @@ struct SensorData {
 
 struct ActuatorState {
   bool pump;
-  bool fan_main;
-  bool fan_aux;
   bool led12v;
   bool window;  // true=OPEN, false=CLOSE
   bool door;
+  // Note: For fan control, use PCF8574 I2C expander (not in minimal version)
 };
 
 SensorData sensors;
@@ -128,12 +144,12 @@ bool dfPlayerReady = false;
 void setup() {
   // Init pins
   pinMode(RELAY_PUMP, OUTPUT);
-  pinMode(RELAY_FAN, OUTPUT);
-  pinMode(RELAY_LIGHT12V, OUTPUT);
-  pinMode(RELAY_AUXFAN, OUTPUT);
+  pinMode(RELAY_LED12V, OUTPUT);
 
   pinMode(JSN_TRIG, OUTPUT);
   pinMode(JSN_ECHO, INPUT);
+
+  pinMode(BUTTON_DOOR, INPUT_PULLUP);
 
   // Safe initial state
   safeState();
@@ -168,14 +184,22 @@ void setup() {
   actuators.window = false;
   actuators.door = false;
 
+  // Init WS2812 Ring #1
+  strip.begin();
+  strip.clear();
+  strip.show();
+
   // Init DFPlayer
   dfSerial.begin(9600);
   delay(500);
   initDFPlayer();
 
-  // Init UART (hardware Serial)
-  Serial.begin(UART_BAUD);
-  while (!Serial) ; // Wait for serial ready
+  // Init UART with ESP8266 (AltSoftSerial on D8/D9)
+  espSerial.begin(UART_BAUD);
+
+  // Hardware Serial for debugging (optional, can be removed)
+  Serial.begin(115200);
+  Serial.println("Greenhouse UNO v1.1 FINAL");
 
   delay(1000);
   lcd.clear();
@@ -199,8 +223,8 @@ void loop() {
     sendSensorData();
   }
 
-  // Check UART for commands
-  if (Serial.available()) {
+  // Check UART for commands from ESP8266
+  if (espSerial.available()) {
     handleUartCommand();
     lastUartCheck = now;
     uartConnected = true;
@@ -278,22 +302,26 @@ void sendSensorData() {
   doc["type"] = "sensor";
   doc["ts"] = millis() / 1000;
 
-  JsonObject payload = doc.createNestedObject("payload");
-  payload["temp_c"] = sensors.temp_c;
-  payload["hum_pct"] = sensors.hum_pct;
-  payload["light_lux"] = sensors.light_lux;
-  payload["soil_pct"] = sensors.soil_pct;
-  payload["mq3"] = sensors.mq3;
-  payload["flame"] = sensors.flame;
-  payload["sound"] = sensors.sound;
-  payload["distance_cm"] = sensors.distance_cm;
+  JsonObject data = doc.createNestedObject("data");
+  data["temperature"] = String(sensors.temp_c, 1);
+  data["humidity"] = String(sensors.hum_pct, 1);
+  data["lightIntensity"] = String((int)sensors.light_lux);
+  data["soilMoisture"] = String(sensors.soil_pct, 1);
+  data["gasMQ3"] = String(sensors.mq3 * 5.0 / 1023.0, 2);  // Convert to voltage
+  data["flameAnalog"] = String(sensors.flame);
+  data["soundLevel"] = String(sensors.sound);
+  data["waterTankLevel"] = String((int)sensors.distance_cm);  // Placeholder
 
+  serializeJson(doc, espSerial);
+  espSerial.println();
+
+  // Also send to debug Serial (optional)
   serializeJson(doc, Serial);
   Serial.println();
 }
 
 void handleUartCommand() {
-  String line = Serial.readStringUntil('\n');
+  String line = espSerial.readStringUntil('\n');
   line.trim();
 
   if (line.length() == 0) return;
@@ -303,71 +331,59 @@ void handleUartCommand() {
 
   if (error) {
     uartErrorCount++;
+    Serial.print("UART parse error: ");
+    Serial.println(line);
     return;
   }
 
   const char* type = doc["type"];
-  if (strcmp(type, "set") == 0) {
-    handleSetCommand(doc);
+  if (strcmp(type, "control") == 0) {
+    handleControlCommand(doc);
   }
 }
 
-void handleSetCommand(JsonDocument& doc) {
-  long req_id = doc["req_id"];
-  JsonObject payload = doc["payload"];
+void handleControlCommand(JsonDocument& doc) {
+  const char* device = doc["device"];
+  const char* action = doc["action"];
+
+  if (device == NULL || action == NULL) return;
 
   bool ok = true;
 
   // Relays
-  if (payload.containsKey("pump")) {
-    int val = payload["pump"];
-    actuators.pump = (val == 1);
+  if (strcmp(device, "pump") == 0) {
+    actuators.pump = (strcmp(action, "ON") == 0);
     setRelay(RELAY_PUMP, actuators.pump);
+    pushLcdMessage("PUMP", action);
   }
-
-  if (payload.containsKey("fan_main")) {
-    int val = payload["fan_main"];
-    actuators.fan_main = (val == 1);
-    setRelay(RELAY_FAN, actuators.fan_main);
-  }
-
-  if (payload.containsKey("fan_aux")) {
-    int val = payload["fan_aux"];
-    actuators.fan_aux = (val == 1);
-    setRelay(RELAY_AUXFAN, actuators.fan_aux);
-  }
-
-  if (payload.containsKey("led12v")) {
-    int val = payload["led12v"];
-    actuators.led12v = (val == 1 || val == 2);
-    setRelay(RELAY_LIGHT12V, actuators.led12v);
-    // Note: BLINK (val==2) not implemented on UNO, ESP8266 handles LED effects
+  else if (strcmp(device, "mainGrowLight") == 0) {
+    actuators.led12v = (strcmp(action, "ON") == 0);
+    setRelay(RELAY_LED12V, actuators.led12v);
+    pushLcdMessage("LIGHT", action);
   }
 
   // Servos
-  if (payload.containsKey("window")) {
-    int val = payload["window"];
-    actuators.window = (val == 1);
+  else if (strcmp(device, "window1") == 0) {
+    actuators.window = (strcmp(action, "OPEN") == 0);
     servoWindow.write(actuators.window ? 90 : 0);
-    pushLcdMessage("WINDOW", actuators.window ? "OPENING" : "CLOSING");
+    pushLcdMessage("WINDOW", action);
   }
-
-  if (payload.containsKey("door")) {
-    int val = payload["door"];
-    actuators.door = (val == 1);
+  else if (strcmp(device, "mainDoor") == 0) {
+    actuators.door = (strcmp(action, "OPEN") == 0);
     servoDoor.write(actuators.door ? 90 : 0);
-    pushLcdMessage("DOOR", actuators.door ? "OPENING" : "CLOSING");
+    pushLcdMessage("DOOR", action);
   }
 
-  // Send ACK
+  // Send ACK back to ESP8266
   StaticJsonDocument<128> ack;
   ack["type"] = "ack";
   ack["ts"] = millis() / 1000;
-  ack["req_id"] = req_id;
+  ack["device"] = device;
+  ack["action"] = action;
   ack["ok"] = ok;
 
-  serializeJson(ack, Serial);
-  Serial.println();
+  serializeJson(ack, espSerial);
+  espSerial.println();
 }
 
 void setRelay(int pin, bool state) {
@@ -471,13 +487,9 @@ void updateLcd() {
 // ==================== SAFETY & FALLBACK ====================
 void safeState() {
   digitalWrite(RELAY_PUMP, RELAY_OFF);
-  digitalWrite(RELAY_FAN, RELAY_OFF);
-  digitalWrite(RELAY_LIGHT12V, RELAY_OFF);
-  digitalWrite(RELAY_AUXFAN, RELAY_OFF);
+  digitalWrite(RELAY_LED12V, RELAY_OFF);
 
   actuators.pump = false;
-  actuators.fan_main = false;
-  actuators.fan_aux = false;
   actuators.led12v = false;
 }
 
@@ -488,18 +500,16 @@ void fallbackSafety() {
   // Check flame
   if (sensors.flame > FLAME_THRESHOLD) {
     setRelay(RELAY_PUMP, false);  // Turn off pump
-    setRelay(RELAY_FAN, true);    // Fan ON
-    setRelay(RELAY_AUXFAN, true); // Aux fan ON
-    pushLcdMessage("FIRE DETECT!", "FANS ON");
+    // NOTE: Fan control requires PCF8574 I2C expander
+    pushLcdMessage("FIRE DETECT!", "PUMP OFF");
+    servoWindow.write(90);  // Open window for ventilation
     return;
   }
 
   // Check temperature
   if (sensors.temp_c > TEMP_SAFE_MAX) {
-    setRelay(RELAY_FAN, true);
-    setRelay(RELAY_AUXFAN, true);
     servoWindow.write(90); // Open window
-    pushLcdMessage("TEMP HIGH", "COOLING");
+    pushLcdMessage("TEMP HIGH", "WINDOW OPEN");
     return;
   }
 
@@ -508,28 +518,38 @@ void fallbackSafety() {
 }
 
 void emergencyChecks() {
-  // Always check flame regardless of mode
-  if (sensors.flame > FLAME_THRESHOLD) {
-    // Send event
+  static unsigned long lastFlameEvent = 0;
+  static unsigned long lastSoundEvent = 0;
+  unsigned long now = millis();
+
+  // Always check flame regardless of mode (debounce: once per second)
+  if (sensors.flame > FLAME_THRESHOLD && (now - lastFlameEvent > 1000)) {
+    lastFlameEvent = now;
+
+    // Send event to ESP8266
     StaticJsonDocument<128> doc;
     doc["type"] = "event";
-    doc["ts"] = millis() / 1000;
-    doc["event"] = "FIRE";
-    doc["level"] = sensors.flame;
+    doc["event"] = "flame";
+    doc["value"] = "DETECTED";
 
-    serializeJson(doc, Serial);
-    Serial.println();
+    serializeJson(doc, espSerial);
+    espSerial.println();
+
+    Serial.println("FLAME DETECTED!");
   }
 
-  // Sound alert
-  if (sensors.sound > SOUND_THRESHOLD) {
+  // Sound alert (debounce: once per second)
+  if (sensors.sound > SOUND_THRESHOLD && (now - lastSoundEvent > 1000)) {
+    lastSoundEvent = now;
+
     StaticJsonDocument<128> doc;
     doc["type"] = "event";
-    doc["ts"] = millis() / 1000;
-    doc["event"] = "SOUND";
-    doc["level"] = sensors.sound;
+    doc["event"] = "sound";
+    doc["value"] = "LOUD";
 
-    serializeJson(doc, Serial);
-    Serial.println();
+    serializeJson(doc, espSerial);
+    espSerial.println();
+
+    Serial.println("LOUD SOUND!");
   }
 }
