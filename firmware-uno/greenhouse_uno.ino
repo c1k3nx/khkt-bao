@@ -117,6 +117,10 @@
 #define DEBUG_BUFFER_SIZE 256
 #define DEBUG_SEND_INTERVAL 100  // Minimum interval between debug messages
 
+// Sensor filtering (v1.4 Phase 3)
+#define ULTRASONIC_SAMPLES 5  // Median filter samples
+#define MA_SIZE 10            // Moving average buffer size
+
 // ==================== OBJECTS ====================
 // DHT dht(DHT_PIN, DHT_TYPE);  // REMOVED - now on ESP8266
 BH1750 lightMeter(0x23);
@@ -188,6 +192,42 @@ bool dfPlayerReady = false;
 char debugBuffer[DEBUG_BUFFER_SIZE];
 bool debugPending = false;
 unsigned long lastDebugSend = 0;
+
+// ==================== MOVING AVERAGE FILTER (v1.4 Phase 3) ====================
+class MovingAverage {
+private:
+  int buffer[MA_SIZE];
+  int index;
+  long sum;
+  int count;
+
+public:
+  MovingAverage() : index(0), sum(0), count(0) {
+    for (int i = 0; i < MA_SIZE; i++) {
+      buffer[i] = 0;
+    }
+  }
+
+  int add(int value) {
+    if (count < MA_SIZE) {
+      count++;
+    } else {
+      sum -= buffer[index];
+    }
+
+    buffer[index] = value;
+    sum += value;
+    index = (index + 1) % MA_SIZE;
+
+    return sum / count;
+  }
+};
+
+// Global filters for analog sensors
+MovingAverage soilFilter;
+MovingAverage flameFilter;
+MovingAverage soundFilter;
+MovingAverage mq3Filter;
 
 // ==================== SETUP ====================
 void setup() {
@@ -333,39 +373,65 @@ void readAllSensors() {
   // DHT11 removed - temp/humidity now read by ESP8266
   // Temp/humidity will be received via UART from ESP8266
 
-  // BH1750
+  // BH1750 - Already stable, no filter needed
   sensors.light_lux = lightMeter.readLightLevel();
   if (sensors.light_lux < 0) sensors.light_lux = 0;
 
-  // Soil moisture (analog, 0-1023)
+  // Soil moisture with moving average filter (v1.4 Phase 3)
   int soilRaw = analogRead(ANALOG_SOIL);
-  sensors.soil_pct = map(soilRaw, 0, 1023, 0, 100);
+  int soilFiltered = soilFilter.add(soilRaw);
+  sensors.soil_pct = map(soilFiltered, 0, 1023, 0, 100);
 
-  // MQ-3 alcohol
-  sensors.mq3 = analogRead(ANALOG_MQ3);
+  // MQ-3 with moving average filter
+  int mq3Raw = analogRead(ANALOG_MQ3);
+  sensors.mq3 = mq3Filter.add(mq3Raw);
 
-  // Flame sensor
-  sensors.flame = analogRead(ANALOG_FLAME);
+  // Flame sensor with moving average filter
+  int flameRaw = analogRead(ANALOG_FLAME);
+  sensors.flame = flameFilter.add(flameRaw);
 
-  // Sound sensor
-  sensors.sound = analogRead(ANALOG_SOUND);
+  // Sound sensor with moving average filter
+  int soundRaw = analogRead(ANALOG_SOUND);
+  sensors.sound = soundFilter.add(soundRaw);
 
-  // JSN-SR04T ultrasonic
+  // JSN-SR04T ultrasonic with median filter (v1.4 Phase 3)
   sensors.distance_cm = readUltrasonic();
 }
 
+// Median filter for ultrasonic sensor (v1.4 Phase 3)
 float readUltrasonic() {
-  digitalWrite(JSN_TRIG, LOW);
-  delayMicroseconds(2);
-  digitalWrite(JSN_TRIG, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(JSN_TRIG, LOW);
+  float samples[ULTRASONIC_SAMPLES];
 
-  long duration = pulseIn(JSN_ECHO, HIGH, 30000);
-  if (duration == 0) return -1;
+  // Collect samples
+  for (int i = 0; i < ULTRASONIC_SAMPLES; i++) {
+    digitalWrite(JSN_TRIG, LOW);
+    delayMicroseconds(2);
+    digitalWrite(JSN_TRIG, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(JSN_TRIG, LOW);
 
-  float distance = duration * 0.034 / 2.0;
-  return distance;
+    long duration = pulseIn(JSN_ECHO, HIGH, 30000);
+    if (duration == 0) {
+      samples[i] = -1;
+    } else {
+      samples[i] = duration * 0.034 / 2.0;
+    }
+    delay(10);  // Small delay between samples
+  }
+
+  // Sort samples using bubble sort
+  for (int i = 0; i < ULTRASONIC_SAMPLES - 1; i++) {
+    for (int j = i + 1; j < ULTRASONIC_SAMPLES; j++) {
+      if (samples[i] > samples[j]) {
+        float temp = samples[i];
+        samples[i] = samples[j];
+        samples[j] = temp;
+      }
+    }
+  }
+
+  // Return median value (middle element)
+  return samples[ULTRASONIC_SAMPLES / 2];
 }
 
 // ==================== UART COMMUNICATION ====================
