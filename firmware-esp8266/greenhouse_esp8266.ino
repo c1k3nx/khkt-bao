@@ -1,25 +1,32 @@
 /*******************************************************************************
- * GREENHOUSE ESP8266 FIRMWARE - v1.1 FINAL
+ * GREENHOUSE ESP8266 FIRMWARE - v1.2 BUGFIX
  * ============================================================================
  * Chức năng:
  * - MQTT Bridge: Subscribe commands, publish sensor/status
  * - UART với UNO: SoftwareSerial 115200 baud
  * - GPS NEO-6: SoftwareSerial 9600 baud
+ * - DHT11: GPIO4 (Temperature/Humidity sensor)
  * - LED WS2812B Ring #2: 8 LEDs
  * - Config storage: LittleFS
  * - Watchdog & retry logic
  *
+ * BUGFIX v1.2: DHT11 moved from UNO to ESP8266 GPIO4
+ * - Fixes D13 pin conflict on UNO
+ * - ESP8266 now reads temp/humidity directly and publishes to MQTT
+ *
  * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
+ * - DHT11: GPIO4 (D2) - Temperature & Humidity sensor
  * - UNO UART: GPIO12 (RX) ← UNO D9 TX, GPIO14 (TX) → UNO D8 RX (SoftwareSerial 115200)
  * - GPS: GPIO13 (RX) ← NEO-6 TX, GPIO15 (TX) → NEO-6 RX (SoftwareSerial 9600)
  * - WS2812 Ring #2: GPIO2 (D4) - 8 LEDs, NeoPixelBus UART method
- * - Reserve: GPIO1/3 (UART0 for debug), GPIO4, GPIO5
+ * - Reserve: GPIO1/3 (UART0 for debug), GPIO5
  ******************************************************************************/
 
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <SoftwareSerial.h>
+#include <DHT.h>  // DHT11 sensor library
 #include <NeoPixelBus.h>  // NeoPixelBus instead of Adafruit_NeoPixel for ESP8266
 #include <LittleFS.h>
 #include <TinyGPSPlus.h>
@@ -33,6 +40,10 @@ const char* WIFI_PASS = "YourWiFiPassword";
 const char* MQTT_BROKER = "broker.hivemq.com";
 const int MQTT_PORT = 1883;
 const char* MQTT_CLIENT_ID = "greenhouse-esp8266";
+
+// DHT11 Sensor (NEW in v1.2)
+#define DHT_PIN 4        // GPIO4 (D2)
+#define DHT_TYPE DHT11
 
 // UART with UNO (SoftwareSerial)
 #define UNO_RX 12    // GPIO12 (D6) ← UNO TX (D9 via level shift)
@@ -51,6 +62,7 @@ const char* MQTT_CLIENT_ID = "greenhouse-esp8266";
 #define LED_COUNT 8
 
 // Timings
+#define DHT_READ_INTERVAL 2000   // Read DHT11 every 2 seconds
 #define SENSOR_PUBLISH_INTERVAL 3000
 #define STATUS_PUBLISH_INTERVAL 5000
 #define HEARTBEAT_INTERVAL 30000
@@ -62,6 +74,7 @@ PubSubClient mqtt(wifiClient);
 SoftwareSerial unoSerial(UNO_RX, UNO_TX);  // For communication with UNO
 SoftwareSerial gpsSerial(GPS_RX, GPS_TX);
 TinyGPSPlus gps;
+DHT dht(DHT_PIN, DHT_TYPE);  // DHT11 sensor (NEW in v1.2)
 
 // WS2812 Ring #2 using NeoPixelBus UART method (avoids Wi-Fi jitter)
 NeoPixelBus<NeoGrbFeature, NeoEsp8266Uart800KbpsMethod> ring2(LED_COUNT);
@@ -105,6 +118,7 @@ unsigned long lastSensorPublish = 0;
 unsigned long lastStatusPublish = 0;
 unsigned long lastHeartbeat = 0;
 unsigned long lastGpsRead = 0;
+unsigned long lastDhtRead = 0;  // DHT11 reading timer (NEW in v1.2)
 
 int uartErrorCount = 0;
 int mqttReconnectAttempts = 0;
@@ -127,8 +141,13 @@ bool ledAlertPhase = false;
 void setup() {
   // Hardware UART for debugging (optional)
   Serial.begin(115200);
-  Serial.println("\nGreenhouse ESP8266 v1.1 FINAL");
+  Serial.println("\nGreenhouse ESP8266 v1.2 BUGFIX");
+  Serial.println("DHT11 now on GPIO4");
   delay(100);
+
+  // Init DHT11 sensor (NEW in v1.2)
+  dht.begin();
+  Serial.println("DHT11 initialized");
 
   // Init UART with UNO
   unoSerial.begin(UART_BAUD);
@@ -200,6 +219,12 @@ void loop() {
   // Check UART timeout
   if (now - lastSensorReceived > UART_TIMEOUT && lastSensorReceived > 0) {
     publishError("uart_timeout", "No data from UNO for 3s");
+  }
+
+  // Read DHT11 (NEW in v1.2)
+  if (now - lastDhtRead >= DHT_READ_INTERVAL) {
+    lastDhtRead = now;
+    readDht();
   }
 
   // Read GPS
@@ -387,14 +412,9 @@ void handleSensorData(JsonDocument& doc) {
   JsonObject data = doc["data"];
 
   // Parse sensor data (format matches mqtt-schema.json)
-  if (data.containsKey("temperature")) {
-    String temp = data["temperature"];
-    sensorData.temp_c = temp.toFloat();
-  }
-  if (data.containsKey("humidity")) {
-    String hum = data["humidity"];
-    sensorData.hum_pct = hum.toFloat();
-  }
+  // NOTE v1.2: temperature and humidity NO LONGER sent by UNO
+  // ESP8266 reads DHT11 directly on GPIO4
+
   if (data.containsKey("lightIntensity")) {
     String light = data["lightIntensity"];
     sensorData.light_lux = light.toFloat();
@@ -469,6 +489,25 @@ void sendCommandToUno(String device, String action) {
   Serial.print("Sent to UNO: ");
   serializeJson(doc, Serial);
   Serial.println();
+}
+
+// ==================== DHT11 SENSOR (NEW in v1.2) ====================
+void readDht() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+
+  if (!isnan(temp) && !isnan(hum)) {
+    sensorData.temp_c = temp;
+    sensorData.hum_pct = hum;
+    Serial.print("DHT11: T=");
+    Serial.print(temp, 1);
+    Serial.print("°C H=");
+    Serial.print(hum, 1);
+    Serial.println("%");
+  } else {
+    Serial.println("DHT11 read failed!");
+    // Keep previous values on read failure
+  }
 }
 
 // ==================== GPS ====================

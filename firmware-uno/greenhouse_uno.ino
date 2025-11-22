@@ -1,31 +1,35 @@
 /*******************************************************************************
- * GREENHOUSE UNO R3 FIRMWARE - v1.1 FINAL
+ * GREENHOUSE UNO R3 FIRMWARE - v1.2 BUGFIX
  * ============================================================================
  * Chức năng:
- * - Đọc cảm biến: DHT11, BH1750, JSN-SR04T, MQ-3, Flame, Sound, Soil moisture
+ * - Đọc cảm biến: BH1750, JSN-SR04T, MQ-3, Flame, Sound, Soil moisture
  * - Điều khiển: 2 relay (direct), 2 servo, DFPlayer Mini, WS2812 Ring #1
  * - Hiển thị: LCD1602 I2C
  * - Giao tiếp: AltSoftSerial 115200 baud với ESP8266 (JSON protocol)
  * - Fallback an toàn khi mất kết nối
+ *
+ * BUGFIX v1.2: DHT11 removed from UNO (moved to ESP8266 GPIO4)
+ * - Fixes D13 pin conflict between DHT11 and WS2812
+ * - Temperature/Humidity now read by ESP8266 and forwarded via UART
  *
  * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
  * - AltSoftSerial: D8 (RX) ← ESP8266 TX, D9 (TX) → ESP8266 RX (115200 baud)
  * - DFPlayer: D12 (RX), D11 (TX) - SoftwareSerial 9600 baud
  * - Servos: D6 (Window MG996R), D5 (Door MG90)
  * - JSN-SR04T: D3 (TRIG), D2 (ECHO)
- * - DHT11: D13 (may need to disconnect onboard LED jumper)
+ * - WS2812 Ring #1: D13 (8 LEDs) - NOW EXCLUSIVE, no conflict!
  * - Relays (direct): D7 (Pump), D10 (LED 12V Grow Light)
- * - WS2812 Ring #1: D13 (8 LEDs, shares with DHT11)
  * - Button: D4 (Open Main Door, INPUT_PULLUP)
  * - Analog: A0 (Flame), A1 (Sound), A2 (Soil), A3 (MQ-3)
  * - I2C: A4 (SDA), A5 (SCL) - BH1750 + LCD1602
  *
+ * NOTE: DHT11 (temp/humidity) is now on ESP8266 GPIO4
  * NOTE: For full 4-relay control, use PCF8574 I2C expander (recommended)
  ******************************************************************************/
 
 #include <Wire.h>
 #include <Servo.h>
-#include <DHT.h>
+// #include <DHT.h>  // REMOVED - DHT11 moved to ESP8266
 #include <BH1750.h>
 #include <LiquidCrystal_I2C.h>
 #include <AltSoftSerial.h>  // D8 RX, D9 TX (fixed pins)
@@ -35,8 +39,9 @@
 
 // ==================== CONFIGURATION ====================
 // Sensors
-#define DHT_PIN 13
-#define DHT_TYPE DHT11
+// DHT11 REMOVED - now on ESP8266 GPIO4
+// #define DHT_PIN 13
+// #define DHT_TYPE DHT11
 
 #define JSN_TRIG 3
 #define JSN_ECHO 2
@@ -84,7 +89,7 @@
 #define LCD_MSG_DURATION 1000
 
 // ==================== OBJECTS ====================
-DHT dht(DHT_PIN, DHT_TYPE);
+// DHT dht(DHT_PIN, DHT_TYPE);  // REMOVED - now on ESP8266
 BH1750 lightMeter(0x23);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 Servo servoWindow;
@@ -95,8 +100,7 @@ Adafruit_NeoPixel strip(WS2812_COUNT, WS2812_PIN, NEO_GRB + NEO_KHZ800);
 
 // ==================== GLOBAL STATE ====================
 struct SensorData {
-  float temp_c;
-  float hum_pct;
+  // temp_c and hum_pct removed - now read by ESP8266
   float soil_pct;
   float light_lux;
   int mq3;
@@ -163,18 +167,21 @@ void setup() {
   lcd.setCursor(0, 0);
   lcd.print("GREENHOUSE UNO");
   lcd.setCursor(0, 1);
-  lcd.print("INITIALIZING...");
+  lcd.print("v1.2 BUGFIX");
+  delay(1000);
 
-  // Init DHT
-  dht.begin();
+  // DHT init removed - now on ESP8266
+  // dht.begin();
 
   // Init BH1750
   if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
-    // OK
+    lcd.setCursor(0, 1);
+    lcd.print("BH1750 OK       ");
   } else {
     lcd.setCursor(0, 1);
     lcd.print("BH1750 ERROR!   ");
   }
+  delay(500);
 
   // Init Servos
   servoWindow.attach(SERVO_WINDOW);
@@ -255,11 +262,8 @@ void loop() {
 
 // ==================== SENSOR READING ====================
 void readAllSensors() {
-  // DHT11
-  sensors.temp_c = dht.readTemperature();
-  sensors.hum_pct = dht.readHumidity();
-  if (isnan(sensors.temp_c)) sensors.temp_c = -999;
-  if (isnan(sensors.hum_pct)) sensors.hum_pct = -999;
+  // DHT11 removed - temp/humidity now read by ESP8266
+  // Temp/humidity will be received via UART from ESP8266
 
   // BH1750
   sensors.light_lux = lightMeter.readLightLevel();
@@ -303,8 +307,7 @@ void sendSensorData() {
   doc["ts"] = millis() / 1000;
 
   JsonObject data = doc.createNestedObject("data");
-  data["temperature"] = String(sensors.temp_c, 1);
-  data["humidity"] = String(sensors.hum_pct, 1);
+  // temperature and humidity removed - ESP8266 reads DHT11 directly
   data["lightIntensity"] = String((int)sensors.light_lux);
   data["soilMoisture"] = String(sensors.soil_pct, 1);
   data["gasMQ3"] = String(sensors.mq3 * 5.0 / 1023.0, 2);  // Convert to voltage
@@ -459,28 +462,19 @@ void updateLcd() {
   if (lcdShowingSensor) {
     lcd.clear();
 
-    // Line 1: T:25.5C H:68%
+    // Line 1: SOIL:45% LUX:120
     lcd.setCursor(0, 0);
-    lcd.print("T:");
-    if (sensors.temp_c > -500) {
-      lcd.print(sensors.temp_c, 1);
-    } else {
-      lcd.print("--.-");
-    }
-    lcd.print("C H:");
-    if (sensors.hum_pct > -500) {
-      lcd.print((int)sensors.hum_pct);
-    } else {
-      lcd.print("--");
-    }
-    lcd.print("%");
-
-    // Line 2: SOIL:45% LUX:120
-    lcd.setCursor(0, 1);
-    lcd.print("S:");
+    lcd.print("SOIL:");
     lcd.print((int)sensors.soil_pct);
-    lcd.print("% L:");
+    lcd.print("% LX:");
     lcd.print((int)sensors.light_lux);
+
+    // Line 2: FLAME:123 SND:456
+    lcd.setCursor(0, 1);
+    lcd.print("F:");
+    lcd.print(sensors.flame);
+    lcd.print(" S:");
+    lcd.print(sensors.sound);
   }
 }
 
@@ -506,14 +500,10 @@ void fallbackSafety() {
     return;
   }
 
-  // Check temperature
-  if (sensors.temp_c > TEMP_SAFE_MAX) {
-    servoWindow.write(90); // Open window
-    pushLcdMessage("TEMP HIGH", "WINDOW OPEN");
-    return;
-  }
+  // Temperature check removed - DHT11 now on ESP8266
+  // ESP8266 will handle temperature-based control
 
-  // Default safe
+  // Default safe state
   safeState();
 }
 

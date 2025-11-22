@@ -1,7 +1,26 @@
-# Pin Mapping - FINAL (Official Version)
+# Pin Mapping - FINAL v1.2 BUGFIX (Official Version)
 
-**Last updated**: 2025-11-23
+**Last updated**: 2025-11-22
+**Version**: 1.2 BUGFIX
 **Status**: LOCKED - Use this as single source of truth
+
+---
+
+## 🐛 BUGFIX v1.2 - D13 Pin Conflict RESOLVED
+
+**Problem**: DHT11 and WS2812 Ring #1 both assigned to D13 → **CONFLICT!**
+
+**Solution**: **DHT11 moved from UNO D13 to ESP8266 GPIO4**
+
+**Changes**:
+- ✅ UNO D13 now **exclusive** to WS2812 Ring #1 (no conflict)
+- ✅ ESP8266 GPIO4 now reads DHT11 temperature/humidity
+- ✅ UNO no longer sends temp/humidity via UART
+- ✅ ESP8266 publishes temp/humidity directly to MQTT
+
+**Impact**:
+- Firmware v1.2 required on both UNO and ESP8266
+- Hardware: Move DHT11 from UNO D13 to ESP8266 GPIO4 (D2)
 
 ---
 
@@ -41,12 +60,12 @@
 | D10 | **Relay: LED 12V** | Output | Digital | Active LOW relay |
 | D11 | **DFPlayer TX** | Output | Serial | → DFPlayer RX (9600 baud) |
 | D12 | **DFPlayer RX** | Input | Serial | ← DFPlayer TX (9600 baud) |
-| D13 | **WS2812 Ring #1** | Output | Digital | 8 LEDs, NeoPixel library |
+| D13 | **WS2812 Ring #1** | Output | Digital | 8 LEDs, NeoPixel library (EXCLUSIVE in v1.2) |
 
 **Notes**:
 - **D8/D9**: AltSoftSerial (better timing than SoftwareSerial for critical comms)
 - **D11/D12**: SoftwareSerial for DFPlayer (9600 baud OK for audio commands)
-- **D13**: Also has onboard LED, but WS2812 will override it
+- **D13**: WS2812 Ring #1 ONLY (v1.2: DHT11 moved to ESP8266 GPIO4)
 
 ### Analog Pins
 
@@ -118,7 +137,7 @@
 | GPIO1 | TX | **UART0 TX** | Output | USB debug (avoid using) |
 | GPIO2 | D4 | **WS2812 Ring #2** | Output | 8 LEDs, NeoPixelBus UART method |
 | GPIO3 | RX | **UART0 RX** | Input | USB debug (avoid using) |
-| GPIO4 | D2 | (Reserved) | - | Can use for I²C SDA if needed |
+| GPIO4 | D2 | **DHT11 Sensor** | Input | **Temperature & Humidity (v1.2 BUGFIX)** |
 | GPIO5 | D1 | (Reserved) | - | Can use for I²C SCL if needed |
 | GPIO12 | D6 | **From UNO TX** | Input | ← AltSoftSerial D9 (via level shift!) |
 | GPIO13 | D7 | **GPS RX** | Input | ← NEO-6 TX (SoftwareSerial) |
@@ -143,6 +162,34 @@ Output voltage: 5V × (2kΩ / 3kΩ) = 3.33V ✓
 ESP8266 GPIO14 (TX, 3.3V) ────── UNO D8 (RX, tolerates 3.3V) ✓
 ```
 
+### DHT11 Sensor (v1.2 BUGFIX)
+
+**Library**: DHT sensor library by Adafruit
+
+```cpp
+#include <DHT.h>
+
+#define DHT_PIN 4
+#define DHT_TYPE DHT11
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+void setup() {
+  dht.begin();
+}
+
+void loop() {
+  float temp = dht.readTemperature();  // °C
+  float hum = dht.readHumidity();      // %RH
+
+  if (!isnan(temp) && !isnan(hum)) {
+    // Publish to MQTT
+    mqtt.publish("greenhouse/data/temperature", String(temp, 1).c_str());
+    mqtt.publish("greenhouse/data/humidity", String(hum, 1).c_str());
+  }
+}
+```
+
 ### SoftwareSerial Instances
 
 ```cpp
@@ -151,6 +198,7 @@ SoftwareSerial unoSerial(12, 14);  // RX=GPIO12, TX=GPIO14, 115200 baud
 SoftwareSerial gpsSerial(13, 15);  // RX=GPIO13, TX=GPIO15, 9600 baud
 
 void setup() {
+  dht.begin();  // v1.2: Initialize DHT11
   unoSerial.begin(115200);
   gpsSerial.begin(9600);
 }
