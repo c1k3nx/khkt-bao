@@ -1,6 +1,27 @@
 # Architecture v1.1 - Optimized Design
 
-## Overview
+## ⚠️ DEPRECATION NOTICE
+
+**This document describes v1.1 architecture and is now OUTDATED.**
+
+**Current version**: v1.4 COMPREHENSIVE OVERHAUL
+
+**Major changes in v1.4**:
+- Hardware Serial migration (D0/D1 ↔ GPIO1/3)
+- Baud rate increased to 115200
+- MQTT debug system
+- Sensor filtering (median + moving average)
+- Default thresholds with hysteresis
+- NeoPixel optimization
+
+**For current architecture, see**:
+- [V1.4_COMPREHENSIVE_PLAN.md](V1.4_COMPREHENSIVE_PLAN.md)
+- [V1.4_WIRING_GUIDE.md](V1.4_WIRING_GUIDE.md)
+- [V1.4_USAGE_GUIDE.md](V1.4_USAGE_GUIDE.md)
+
+---
+
+## Overview (v1.1 - Historical)
 
 Version 1.1 addresses pin mapping conflicts and standardizes MQTT communication protocol. Key changes:
 

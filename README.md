@@ -81,27 +81,34 @@ Xem chi tiết trong:
 
 ## 🚀 Bắt đầu
 
+**📖 ĐỌC TRƯỚC KHI BẮT ĐẦU:**
+- [V1.4_WIRING_GUIDE.md](V1.4_WIRING_GUIDE.md) - Hướng dẫn nối mạch chi tiết
+- [V1.4_USAGE_GUIDE.md](V1.4_USAGE_GUIDE.md) - Hướng dẫn sử dụng từ A-Z
+
 ### 1. Flash Firmware
 
-#### Arduino UNO R3
+#### Arduino UNO R3 (v1.4)
 
 ```bash
 # Mở file trong Arduino IDE
 open firmware-uno/greenhouse_uno.ino
 
 # Cài đặt thư viện cần thiết (via Library Manager):
-# - DHT sensor library
-# - Adafruit BH1750
+# - Adafruit BH1750 (light sensor)
 # - LiquidCrystal I2C
 # - ArduinoJson (v6.x)
 # - Servo (built-in)
+# - Adafruit NeoPixel
+# - NewPing (ultrasonic)
 
+# ⚠️ CRITICAL: DISCONNECT D0/D1 pins trước khi upload!
 # Chọn board: Arduino UNO
 # Chọn port COM tương ứng
 # Upload
+# ⚠️ RECONNECT D0/D1 pins sau khi upload xong!
 ```
 
-#### ESP8266
+#### ESP8266 (v1.4)
 
 ```bash
 # Mở file trong Arduino IDE
@@ -114,8 +121,9 @@ open firmware-esp8266/greenhouse_esp8266.ino
 # Cài đặt thư viện:
 # - ESP8266WiFi (built-in)
 # - PubSubClient
-# - ArduinoJson
-# - Adafruit NeoPixel
+# - ArduinoJson (v6.x)
+# - NeoPixelBus (thay Adafruit_NeoPixel cho ESP8266)
+# - DHT sensor library (DHT11 on GPIO4)
 # - TinyGPSPlus
 # - LittleFS (built-in)
 
@@ -123,9 +131,12 @@ open firmware-esp8266/greenhouse_esp8266.ino
 # const char* WIFI_SSID = "YourWiFiSSID";
 # const char* WIFI_PASS = "YourWiFiPassword";
 
+# ⚠️ CRITICAL: DISCONNECT GPIO1/GPIO3 (TX/RX) trước khi upload!
 # Chọn board: NodeMCU 1.0 (ESP-12E Module)
 # Upload Speed: 115200
+# Flash Size: 4MB (FS:2MB OTA:~1019KB)
 # Upload
+# ⚠️ RECONNECT GPIO1/GPIO3 sau khi upload xong!
 ```
 
 #### ESP32-CAM
@@ -220,10 +231,12 @@ Xem chi tiết: [`docs/mqtt-topics.md`](docs/mqtt-topics.md)
 
 ## 🔌 Giao thức UART (UNO ↔ ESP8266)
 
-- **Baud rate**: 57600
+- **Baud rate**: 115200 (v1.4 Hardware Serial)
+- **Connection**: Hardware Serial D0/D1 (UNO) ↔ GPIO1/3 (ESP8266)
 - **Format**: JSON, newline-delimited
 - **Timeout**: 3s
 - **Retry**: 3 lần
+- **⚠️ IMPORTANT**: Disconnect D0/D1 during UNO upload!
 
 Ví dụ:
 
@@ -436,19 +449,23 @@ khkt-bao/
 
 **Mass chung**: Tất cả GND phải nối chung!
 
-### Chia áp UART
+### ⚡ Chia áp UART (v1.4 Hardware Serial)
 
-UNO TX (5V) → ESP8266 RX (3.3V) **CẦN chia áp**:
+**v1.4 sử dụng Hardware Serial D0/D1 (UNO) ↔ GPIO1/3 (ESP8266)**
+
+UNO TX/D1 (5V) → ESP8266 RX/GPIO3 (3.3V) **CẦN chia áp**:
 
 ```
-UNO TX ──┬──── 1kΩ ────┬──── ESP8266 RX
-         │             │
-         └─── 2kΩ ─────┴──── GND
+UNO D1 (TX) ──┬──── 1kΩ ────┬──── ESP8266 GPIO3 (RX)
+              │             │
+              └─── 2kΩ ─────┴──── GND
 
 Vout = 5V × (2kΩ / (1kΩ + 2kΩ)) = 3.33V ✓
 ```
 
-ESP8266 TX (3.3V) → UNO RX (5V): **Không cần** chia áp (UNO chấp nhận 3.3V)
+ESP8266 TX/GPIO1 (3.3V) → UNO RX/D0 (5V): **Không cần** chia áp (UNO chấp nhận 3.3V)
+
+**⚠️ CRITICAL**: Phải disconnect D0/D1 khi upload code lên UNO! (Xem V1.4_USAGE_GUIDE.md)
 
 ### Relay Active Logic
 
@@ -535,7 +552,7 @@ MIT License - Free for educational and commercial use.
 ---
 
 **Dự án**: IoT Greenhouse Control System
-**Version**: 1.0.0
-**Last updated**: 2025
+**Version**: 1.4.0 COMPREHENSIVE OVERHAUL
+**Last updated**: 2025-11-22
 
 **Made with ❤️ for smart agriculture**
