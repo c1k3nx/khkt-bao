@@ -1,9 +1,9 @@
 /*******************************************************************************
- * GREENHOUSE ESP8266 FIRMWARE - v1.3.2 STABILITY FIX
+ * GREENHOUSE ESP8266 FIRMWARE - v1.4 COMPREHENSIVE OVERHAUL
  * ============================================================================
  * Chức năng:
  * - MQTT Bridge: Subscribe commands, publish sensor/status
- * - UART với UNO: SoftwareSerial 115200 baud (bidirectional sync)
+ * - UART với UNO: Hardware Serial 115200 baud (bidirectional sync)
  * - GPS NEO-6: SoftwareSerial 9600 baud
  * - DHT11: GPIO4 (Temperature/Humidity sensor)
  * - LED WS2812B Ring #2: 8 LEDs
@@ -29,14 +29,22 @@
  * - Prevents UNO from receiving unsupported device commands
  * - Ensures proper MQTT status publishing for fan/auxFan
  *
- * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
+ * v1.4 OVERHAUL - Phase 1: Hardware Serial Migration
+ * - Migrated from SoftwareSerial (GPIO12/14) to Hardware Serial (GPIO1/3)
+ * - Higher reliability with hardware UART
+ * - Eliminates SoftwareSerial library dependency for UNO
+ * - Debug now via MQTT (no more Serial debug)
+ *
+ * Pin mapping (OFFICIAL - v1.4):
  * - DHT11: GPIO4 (D2) - Temperature & Humidity sensor
- * - RELAY_FAN: GPIO5 (D1) - Fan relay control (NEW v1.3.1)
- * - RELAY_AUXFAN: GPIO16 (D0) - AuxFan relay control (NEW v1.3.1)
- * - UNO UART: GPIO12 (RX) ← UNO D9 TX, GPIO14 (TX) → UNO D8 RX (SoftwareSerial 115200)
+ * - RELAY_FAN: GPIO5 (D1) - Fan relay control
+ * - RELAY_AUXFAN: GPIO16 (D0) - AuxFan relay control
+ * - UNO UART: GPIO1/3 (TX0/RX0) ↔ UNO D1/D0 (Hardware Serial 115200)
  * - GPS: GPIO13 (RX) ← NEO-6 TX, GPIO15 (TX) → NEO-6 RX (SoftwareSerial 9600)
  * - WS2812 Ring #2: GPIO2 (D4) - 8 LEDs, NeoPixelBus UART method
- * - Reserve: GPIO1/3 (UART0 for debug)
+ *
+ * NOTE: Hardware Serial now used for UNO - NO debug Serial available
+ * NOTE: Use MQTT debug topic (greenhouse/sys/debug) for debugging
  ******************************************************************************/
 
 #include <ESP8266WiFi.h>
@@ -62,9 +70,11 @@ const char* MQTT_CLIENT_ID = "greenhouse-esp8266";
 #define DHT_PIN 4        // GPIO4 (D2)
 #define DHT_TYPE DHT11
 
-// UART with UNO (SoftwareSerial)
-#define UNO_RX 12    // GPIO12 (D6) ← UNO TX (D9 via level shift)
-#define UNO_TX 14    // GPIO14 (D5) → UNO RX (D8)
+// UART with UNO (Hardware Serial - v1.4)
+// GPIO1 (TX0) → UNO D0 (RX)
+// GPIO3 (RX0) ← UNO D1 (TX)
+// #define UNO_RX 12    // REMOVED v1.4 - Using Hardware Serial
+// #define UNO_TX 14    // REMOVED v1.4 - Using Hardware Serial
 #define UART_BAUD 115200
 #define UART_TIMEOUT 3000
 #define UART_RETRY 3
@@ -96,7 +106,8 @@ const char* MQTT_CLIENT_ID = "greenhouse-esp8266";
 // ==================== OBJECTS ====================
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
-SoftwareSerial unoSerial(UNO_RX, UNO_TX);  // For communication with UNO
+// SoftwareSerial unoSerial(UNO_RX, UNO_TX);  // REMOVED v1.4 - Using Hardware Serial
+#define unoSerial Serial  // Hardware Serial for UNO (GPIO1/3)
 SoftwareSerial gpsSerial(GPS_RX, GPS_TX);
 TinyGPSPlus gps;
 DHT dht(DHT_PIN, DHT_TYPE);  // DHT11 sensor (NEW in v1.2)
@@ -164,19 +175,13 @@ bool ledAlertPhase = false;
 
 // ==================== SETUP ====================
 void setup() {
-  // Hardware UART for debugging (optional)
-  Serial.begin(115200);
-  Serial.println("\nGreenhouse ESP8266 v1.3.2 STABILITY FIX");
-  Serial.println("DHT11 on GPIO4, Fan/AuxFan relays on GPIO5/GPIO16");
-  Serial.println("BUGFIX: Fan/AuxFan no longer forwarded to UNO");
+  // Init UART with UNO (Hardware Serial - v1.4)
+  // NOTE: Serial debug removed - using Hardware Serial for UNO communication
+  Serial.begin(UART_BAUD);  // Serial = unoSerial for UNO communication
   delay(100);
 
   // Init DHT11 sensor (NEW in v1.2)
   dht.begin();
-  Serial.println("DHT11 initialized");
-
-  // Init UART with UNO
-  unoSerial.begin(UART_BAUD);
 
   // Init GPS
   gpsSerial.begin(GPS_BAUD);
@@ -195,7 +200,6 @@ void setup() {
   pinMode(RELAY_AUXFAN, OUTPUT);
   digitalWrite(RELAY_FAN, RELAY_OFF);      // Initial state: OFF
   digitalWrite(RELAY_AUXFAN, RELAY_OFF);   // Initial state: OFF
-  Serial.println("Relays initialized (GPIO5=FAN, GPIO16=AUXFAN)");
 
   // Init Wi-Fi
   WiFi.mode(WIFI_STA);
@@ -302,14 +306,14 @@ void connectMqtt() {
       // Publish initial state
       publishDeviceStatus();
       mqttReconnectAttempts = 0;
-      Serial.println("MQTT connected");
+      // Serial debug removed - will use MQTT debug in Phase 2
       return;
     }
     attempts++;
     delay(1000);
   }
 
-  Serial.println("MQTT connection failed");
+  // Serial debug removed - will use MQTT debug in Phase 2
 }
 
 void reconnectMqtt() {
@@ -329,7 +333,7 @@ void reconnectMqtt() {
 
     publishDeviceStatus();
     mqttReconnectAttempts = 0;
-    Serial.println("MQTT reconnected");
+    // Serial debug removed - will use MQTT debug in Phase 2
   }
 }
 
@@ -350,8 +354,7 @@ void handleMqttCommand(String topic, String payload) {
   if (topic == "greenhouse/control/mode") {
     currentMode = payload;
     mqtt.publish("greenhouse/status/mode", payload.c_str(), true);
-    Serial.print("Mode changed to: ");
-    Serial.println(payload);
+    // Serial debug removed - will use MQTT debug in Phase 2
     return;
   }
 
@@ -365,10 +368,7 @@ void handleMqttCommand(String topic, String payload) {
   // Thresholds
   if (topic.startsWith("greenhouse/set/thresholds/")) {
     String param = topic.substring(26);  // After "greenhouse/set/thresholds/"
-    Serial.print("Threshold update: ");
-    Serial.print(param);
-    Serial.print(" = ");
-    Serial.println(payload);
+    // Serial debug removed - will use MQTT debug in Phase 2
     // Store in LittleFS or forward to UNO if needed
     return;
   }
@@ -382,8 +382,7 @@ void handleDeviceCommand(String device, String action) {
     // v1.3.1: Control Fan relay on ESP8266 GPIO5
     bool state = (action == "ON");
     digitalWrite(RELAY_FAN, state ? RELAY_ON : RELAY_OFF);
-    Serial.print("Fan relay: ");
-    Serial.println(state ? "ON" : "OFF");
+    // Serial debug removed - will use MQTT debug in Phase 2
 
     // v1.3.2: Publish status directly, don't send to UNO
     mqtt.publish("greenhouse/status/fan", action.c_str(), true);
@@ -394,8 +393,7 @@ void handleDeviceCommand(String device, String action) {
     // v1.3.1: Control AuxFan relay on ESP8266 GPIO16
     bool state = (action == "ON");
     digitalWrite(RELAY_AUXFAN, state ? RELAY_ON : RELAY_OFF);
-    Serial.print("AuxFan relay: ");
-    Serial.println(state ? "ON" : "OFF");
+    // Serial debug removed - will use MQTT debug in Phase 2
 
     // v1.3.2: Publish status directly, don't send to UNO
     mqtt.publish("greenhouse/status/auxFan", action.c_str(), true);
@@ -427,10 +425,7 @@ void handleDeviceCommand(String device, String action) {
   String statusTopic = "greenhouse/status/" + device;
   mqtt.publish(statusTopic.c_str(), action.c_str(), true);
 
-  Serial.print("Device control: ");
-  Serial.print(device);
-  Serial.print(" = ");
-  Serial.println(action);
+  // Serial debug removed - will use MQTT debug in Phase 2
 }
 
 // ==================== UART WITH UNO ====================
@@ -445,8 +440,7 @@ void handleUartFromUno() {
 
   if (error) {
     uartErrorCount++;
-    Serial.print("UART parse error: ");
-    Serial.println(line);
+    // Serial debug removed - will use MQTT debug in Phase 2
     publishError("uart_parse_error", "Invalid JSON from UNO");
     return;
   }
@@ -456,8 +450,7 @@ void handleUartFromUno() {
   if (strcmp(type, "sensor") == 0) {
     handleSensorData(doc);
   } else if (strcmp(type, "ack") == 0) {
-    // ACK received
-    Serial.println("ACK from UNO");
+    // ACK received - Serial debug removed
   } else if (strcmp(type, "event") == 0) {
     handleEventFromUno(doc);
   }
@@ -497,7 +490,7 @@ void handleSensorData(JsonDocument& doc) {
 
   // Data received, reset error count
   uartErrorCount = 0;
-  Serial.println("Sensor data received from UNO");
+  // Serial debug removed - will use MQTT debug in Phase 2
 }
 
 void handleEventFromUno(JsonDocument& doc) {
@@ -511,10 +504,7 @@ void handleEventFromUno(JsonDocument& doc) {
   topic += event;
   mqtt.publish(topic.c_str(), value);
 
-  Serial.print("Event from UNO: ");
-  Serial.print(event);
-  Serial.print(" = ");
-  Serial.println(value);
+  // Serial debug removed - will use MQTT debug in Phase 2
 
   // Handle fire alert with LED
   if (strcmp(event, "flame") == 0 && strcmp(value, "DETECTED") == 0) {
@@ -540,10 +530,7 @@ void sendCommandToUno(String device, String action) {
   serializeJson(doc, unoSerial);
   unoSerial.println();
 
-  // Also log to debug Serial
-  Serial.print("Sent to UNO: ");
-  serializeJson(doc, Serial);
-  Serial.println();
+  // Serial debug removed - unoSerial IS Serial now
 }
 
 // ==================== DHT11 SENSOR (NEW in v1.2) ====================
@@ -554,16 +541,12 @@ void readDht() {
   if (!isnan(temp) && !isnan(hum)) {
     sensorData.temp_c = temp;
     sensorData.hum_pct = hum;
-    Serial.print("DHT11: T=");
-    Serial.print(temp, 1);
-    Serial.print("°C H=");
-    Serial.print(hum, 1);
-    Serial.println("%");
+    // Serial debug removed - will use MQTT debug in Phase 2
 
     // v1.3: Send environment data to UNO for LCD display
     sendEnvDataToUno();
   } else {
-    Serial.println("DHT11 read failed!");
+    // DHT11 read failed - Serial debug removed
     // Keep previous values on read failure
   }
 }
@@ -587,12 +570,7 @@ void sendEnvDataToUno() {
   serializeJson(doc, unoSerial);
   unoSerial.println();
 
-  // Debug log
-  Serial.print("Sent env to UNO: T=");
-  Serial.print(sensorData.temp_c, 1);
-  Serial.print("°C H=");
-  Serial.print(sensorData.hum_pct, 1);
-  Serial.println("%");
+  // Serial debug removed - will use MQTT debug in Phase 2
 }
 
 // ==================== GPS ====================
@@ -687,10 +665,7 @@ void publishError(const char* code, const char* msg) {
   serializeJson(doc, json);
   mqtt.publish("greenhouse/event/error", json.c_str());
 
-  Serial.print("Error: ");
-  Serial.print(code);
-  Serial.print(" - ");
-  Serial.println(msg);
+  // Serial debug removed - will use MQTT debug in Phase 2
 }
 
 // ==================== LED WS2812 ====================

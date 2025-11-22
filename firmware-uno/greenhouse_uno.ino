@@ -1,11 +1,11 @@
 /*******************************************************************************
- * GREENHOUSE UNO R3 FIRMWARE - v1.3.2 STABILITY FIX
+ * GREENHOUSE UNO R3 FIRMWARE - v1.4 COMPREHENSIVE OVERHAUL
  * ============================================================================
  * Chức năng:
  * - Đọc cảm biến: BH1750, JSN-SR04T, MQ-3, Flame, Sound, Soil moisture
  * - Điều khiển: 2 relay (direct), 2 servo, DFPlayer Mini, WS2812 Ring #1
  * - Hiển thị: LCD1602 I2C multi-screen rotation (ALL sensors)
- * - Giao tiếp: AltSoftSerial 115200 baud với ESP8266 (JSON protocol)
+ * - Giao tiếp: Hardware Serial (D0/D1) 115200 baud với ESP8266 (JSON protocol)
  * - Fallback an toàn khi mất kết nối
  *
  * BUGFIX v1.2: DHT11 removed from UNO (moved to ESP8266 GPIO4)
@@ -26,8 +26,14 @@
  * - Reduces flicker and improves readability
  * - Tracks previous screen to detect changes
  *
- * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
- * - AltSoftSerial: D8 (RX) ← ESP8266 TX, D9 (TX) → ESP8266 RX (115200 baud)
+ * v1.4 OVERHAUL - Phase 1: Hardware Serial Migration
+ * - Migrated from AltSoftSerial (D8/D9) to Hardware Serial (D0/D1)
+ * - Eliminates Timer1 conflict with Servo library
+ * - Higher reliability with hardware UART
+ * - Debug now via MQTT (no more Serial debug)
+ *
+ * Pin mapping (OFFICIAL - v1.4):
+ * - Hardware Serial: D0 (RX) ← ESP8266 TX (GPIO1), D1 (TX) → ESP8266 RX (GPIO3)
  * - DFPlayer: D12 (RX), D11 (TX) - SoftwareSerial 9600 baud
  * - Servos: D6 (Window MG996R), D5 (Door MG90)
  * - JSN-SR04T: D3 (TRIG), D2 (ECHO)
@@ -38,7 +44,8 @@
  * - I2C: A4 (SDA), A5 (SCL) - BH1750 + LCD1602
  *
  * NOTE: DHT11 (temp/humidity) is now on ESP8266 GPIO4
- * NOTE: For full 4-relay control, use PCF8574 I2C expander (recommended)
+ * NOTE: Hardware Serial now used for ESP8266 - NO debug Serial available
+ * NOTE: Use MQTT debug topic (greenhouse/sys/debug) for debugging
  ******************************************************************************/
 
 #include <Wire.h>
@@ -46,8 +53,8 @@
 // #include <DHT.h>  // REMOVED - DHT11 moved to ESP8266
 #include <BH1750.h>
 #include <LiquidCrystal_I2C.h>
-#include <AltSoftSerial.h>  // D8 RX, D9 TX (fixed pins)
-#include <SoftwareSerial.h>  // For DFPlayer
+// #include <AltSoftSerial.h>  // REMOVED v1.4 - Using Hardware Serial now
+#include <SoftwareSerial.h>  // For DFPlayer only
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 
@@ -112,7 +119,8 @@ BH1750 lightMeter(0x23);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 Servo servoWindow;
 Servo servoDoor;
-AltSoftSerial espSerial;  // RX=D8, TX=D9 (fixed by library)
+// AltSoftSerial espSerial;  // REMOVED v1.4 - Using Hardware Serial now
+#define espSerial Serial  // Hardware Serial for ESP8266 (D0/D1)
 SoftwareSerial dfSerial(DF_RX, DF_TX);
 Adafruit_NeoPixel strip(WS2812_COUNT, WS2812_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -195,7 +203,7 @@ void setup() {
   lcd.setCursor(0, 0);
   lcd.print("GREENHOUSE UNO");
   lcd.setCursor(0, 1);
-  lcd.print("v1.3.2 STABLE");
+  lcd.print("v1.4 OVERHAUL");
   delay(1000);
 
   // v1.3: Initialize sensor data
@@ -236,12 +244,12 @@ void setup() {
   delay(500);
   initDFPlayer();
 
-  // Init UART with ESP8266 (AltSoftSerial on D8/D9)
-  espSerial.begin(UART_BAUD);
+  // Init UART with ESP8266 (Hardware Serial on D0/D1)
+  // v1.4: Using Hardware Serial - NO debug Serial available
+  Serial.begin(UART_BAUD);  // Serial = espSerial for ESP8266 communication
 
-  // Hardware Serial for debugging (optional, can be removed)
-  Serial.begin(115200);
-  Serial.println("Greenhouse UNO v1.3.2 STABILITY FIX");
+  // NOTE: Serial debug removed - use MQTT debug instead
+  // See Phase 2 for MQTT debug implementation
 
   delay(1000);
   lcd.clear();
@@ -359,9 +367,7 @@ void sendSensorData() {
   serializeJson(doc, espSerial);
   espSerial.println();
 
-  // Also send to debug Serial (optional)
-  serializeJson(doc, Serial);
-  Serial.println();
+  // Debug Serial removed - espSerial IS Serial now
 }
 
 void handleUartCommand() {
@@ -375,8 +381,7 @@ void handleUartCommand() {
 
   if (error) {
     uartErrorCount++;
-    Serial.print("UART parse error: ");
-    Serial.println(line);
+    // Serial debug removed - will use MQTT debug in Phase 2
     return;
   }
 
@@ -462,12 +467,7 @@ void handleEnvData(JsonDocument& doc) {
     }
   }
 
-  // Debug log
-  Serial.print("Env data from ESP: T=");
-  Serial.print(sensors.temp_c, 1);
-  Serial.print("°C H=");
-  Serial.print(sensors.hum_pct, 1);
-  Serial.println("%");
+  // Debug log removed - will use MQTT debug in Phase 2
 }
 
 // ==================== DFPLAYER ====================
@@ -665,7 +665,7 @@ void emergencyChecks() {
     serializeJson(doc, espSerial);
     espSerial.println();
 
-    Serial.println("FLAME DETECTED!");
+    // Serial debug removed - will use MQTT debug in Phase 2
   }
 
   // Sound alert (debounce: once per second)
@@ -680,6 +680,6 @@ void emergencyChecks() {
     serializeJson(doc, espSerial);
     espSerial.println();
 
-    Serial.println("LOUD SOUND!");
+    // Serial debug removed - will use MQTT debug in Phase 2
   }
 }
