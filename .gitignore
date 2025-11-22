@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Arduino
+*.hex
+*.elf
+*.map
+
+# Config files
+.env
+app_settings.json
+config.json
+
+# Logs
+*.log
+logs/
+
+# Test outputs
+test_image.jpg
+test_yolo_output.jpg
+test_*.jpg
+
+# YOLO weights
+*.pt
+*.weights
+runs/
+
+# Hugging Face cache
+.cache/
+models/
+
+# Temp files
+tmp/
+temp/
+*.tmp
+
+# OS
+Thumbs.db

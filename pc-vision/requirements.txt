@@ -1,0 +1,23 @@
+# PC-Vision requirements for Greenhouse IoT
+
+# Core dependencies
+opencv-python>=4.8.0
+numpy>=1.24.0
+pillow>=10.0.0
+
+# MQTT
+paho-mqtt>=1.6.1
+
+# HTTP requests
+requests>=2.31.0
+
+# YOLO (Ultralytics)
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Hugging Face Transformers
+transformers>=4.30.0
+
+# Optional for GPU acceleration
+# tensorrt  # Uncomment if using NVIDIA TensorRT

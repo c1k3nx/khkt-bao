@@ -1,0 +1,13 @@
+# App requirements (PyQt6 version)
+
+# GUI Framework
+PyQt6>=6.5.0
+
+# MQTT
+paho-mqtt>=1.6.1
+
+# Camera/Video
+opencv-python>=4.8.0
+
+# Optional
+python-dotenv>=1.0.0
