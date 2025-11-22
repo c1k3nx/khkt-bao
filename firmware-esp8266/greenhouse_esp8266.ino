@@ -163,6 +163,20 @@ unsigned long lastMqttReconnect = 0;
 bool systemReady = false;
 String currentMode = "AUTO";
 
+// Default thresholds (v1.4 Phase 5)
+struct Thresholds {
+  float temp_max = 35.0;
+  float temp_min = 15.0;
+  float hum_max = 80.0;
+  float hum_min = 40.0;
+  float soil_min = 30.0;
+  int flame_threshold = 800;
+  int sound_threshold = 700;
+};
+
+Thresholds thresholds;
+bool useDefaults = true;
+
 // LED animation state for Ring #2
 struct LedState {
   String mode;  // "OFF", "COLOR", "ALERT"
@@ -234,6 +248,9 @@ void setup() {
   deviceState.led_power = "OFF";
   deviceState.led_color = "#00FF00";
 
+  // Load thresholds (v1.4 Phase 5)
+  loadThresholds();
+
   systemReady = true;
 }
 
@@ -290,6 +307,9 @@ void loop() {
 
   // Update LED animations
   updateLedAnimations();
+
+  // Auto control (v1.4 Phase 5) - runs every loop
+  autoControl();
 
   delay(10);
 }
@@ -753,4 +773,106 @@ void parseColor(String hexColor, uint8_t& r, uint8_t& g, uint8_t& b) {
   r = strtol(hexColor.substring(1, 3).c_str(), NULL, 16);
   g = strtol(hexColor.substring(3, 5).c_str(), NULL, 16);
   b = strtol(hexColor.substring(5, 7).c_str(), NULL, 16);
+}
+
+// ==================== THRESHOLDS & AUTO CONTROL (v1.4 Phase 5) ====================
+void loadThresholds() {
+  File file = LittleFS.open("/thresholds.json", "r");
+  if (file) {
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, file);
+
+    if (!error) {
+      thresholds.temp_max = doc["temp_max"] | 35.0;
+      thresholds.temp_min = doc["temp_min"] | 15.0;
+      thresholds.hum_max = doc["hum_max"] | 80.0;
+      thresholds.hum_min = doc["hum_min"] | 40.0;
+      thresholds.soil_min = doc["soil_min"] | 30.0;
+      thresholds.flame_threshold = doc["flame_threshold"] | 800;
+      thresholds.sound_threshold = doc["sound_threshold"] | 700;
+      useDefaults = false;
+      mqttDebug("Thresholds loaded from file");
+    }
+    file.close();
+  } else {
+    mqttDebug("Using default thresholds");
+  }
+
+  // Publish current thresholds
+  publishThresholds();
+}
+
+void publishThresholds() {
+  if (!mqtt.connected()) return;
+
+  StaticJsonDocument<256> doc;
+  doc["temp_max"] = thresholds.temp_max;
+  doc["temp_min"] = thresholds.temp_min;
+  doc["hum_max"] = thresholds.hum_max;
+  doc["hum_min"] = thresholds.hum_min;
+  doc["soil_min"] = thresholds.soil_min;
+  doc["flame_threshold"] = thresholds.flame_threshold;
+  doc["sound_threshold"] = thresholds.sound_threshold;
+  doc["source"] = useDefaults ? "default" : "file";
+
+  String json;
+  serializeJson(doc, json);
+  mqtt.publish("greenhouse/sys/thresholds", json.c_str(), true);
+}
+
+void autoControl() {
+  // Only run auto control in AUTO mode
+  if (currentMode != "AUTO") return;
+
+  static unsigned long lastAutoControl = 0;
+  unsigned long now = millis();
+
+  // Run auto control every 5 seconds
+  if (now - lastAutoControl < 5000) return;
+  lastAutoControl = now;
+
+  // Temperature control
+  if (sensorData.temp_c > thresholds.temp_max) {
+    // Turn on fan if not already on
+    if (deviceState.fan != "ON") {
+      handleDeviceCommand("fan", "ON");
+      mqttDebug("Auto: Fan ON (temp high)");
+    }
+  } else if (sensorData.temp_c < thresholds.temp_min) {
+    // Turn off fan if on
+    if (deviceState.fan != "OFF") {
+      handleDeviceCommand("fan", "OFF");
+      mqttDebug("Auto: Fan OFF (temp normal)");
+    }
+  }
+
+  // Soil moisture control
+  if (sensorData.soil_pct < thresholds.soil_min) {
+    // Turn on pump if not already on
+    if (deviceState.pump != "ON") {
+      handleDeviceCommand("pump", "ON");
+      mqttDebug("Auto: Pump ON (soil dry)");
+    }
+  } else {
+    // Turn off pump if on (soil is wet enough)
+    if (deviceState.pump != "OFF") {
+      handleDeviceCommand("pump", "OFF");
+      mqttDebug("Auto: Pump OFF (soil ok)");
+    }
+  }
+
+  // Flame detection (always active, regardless of mode)
+  if (sensorData.flame > thresholds.flame_threshold) {
+    mqttDebug("ALERT: Flame detected!");
+    // Emergency actions: turn off pump, turn on fans
+    if (deviceState.pump != "OFF") {
+      handleDeviceCommand("pump", "OFF");
+    }
+    if (deviceState.fan != "ON") {
+      handleDeviceCommand("fan", "ON");
+    }
+    if (deviceState.auxfan != "ON") {
+      handleDeviceCommand("auxFan", "ON");
+    }
+  }
 }
