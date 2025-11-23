@@ -62,9 +62,9 @@ const char* WIFI_SSID = "YourWiFiSSID";
 const char* WIFI_PASS = "YourWiFiPassword";
 
 // MQTT broker (change if needed)
-const char* MQTT_BROKER = "broker.hivemq.com";
+const char* const MQTT_BROKER = "broker.hivemq.com";
 const int MQTT_PORT = 1883;
-const char* MQTT_CLIENT_ID = "greenhouse-esp8266";
+const char* const MQTT_CLIENT_ID = "greenhouse-esp8266";
 
 // DHT11 Sensor (NEW in v1.2)
 #define DHT_PIN 4        // GPIO4 (D2)
@@ -266,6 +266,11 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
+  // v1.4 Phase 7: WiFi reconnection logic
+  if (WiFi.status() != WL_CONNECTED) {
+    reconnectWiFi();
+  }
+
   // MQTT loop
   if (!mqtt.connected()) {
     reconnectMqtt();
@@ -325,13 +330,45 @@ void loop() {
   // Auto control (v1.4 Phase 5) - runs every loop
   autoControl();
 
-  // v1.4 BUGFIX: Feed watchdog to prevent reset
+  // v1.4 Phase 7: Enhanced watchdog feeding
   yield();  // Let ESP8266 handle Wi-Fi and system tasks
+  ESP.wdtFeed();  // Explicit watchdog feed
 
   delay(10);
 }
 
 // ==================== Wi-Fi & MQTT ====================
+// v1.4 Phase 7: WiFi reconnection with exponential backoff
+void reconnectWiFi() {
+  static unsigned long lastWiFiAttempt = 0;
+  static int wifiReconnectAttempts = 0;
+  unsigned long now = millis();
+
+  // Exponential backoff (2s, 4s, 8s, 16s, max 30s)
+  unsigned long backoff = min(2000 * (1 << wifiReconnectAttempts), 30000UL);
+  if (now - lastWiFiAttempt < backoff) return;
+
+  lastWiFiAttempt = now;
+  wifiReconnectAttempts++;
+
+  WiFi.disconnect();
+  delay(100);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  // Wait up to 5 seconds
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 10) {
+    delay(500);
+    attempts++;
+    ESP.wdtFeed();  // Feed watchdog during connection
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiReconnectAttempts = 0;  // Reset counter on success
+    mqttDebug("WiFi reconnected");
+  }
+}
+
 void connectMqtt() {
   int attempts = 0;
   while (!mqtt.connected() && attempts < 5) {
@@ -374,9 +411,23 @@ void reconnectMqtt() {
   }
 }
 
+// v1.4 Phase 7: MQTT callback with payload size validation
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Validate payload size (max 256 bytes)
+  if (length > 256) {
+    mqttDebug("MQTT payload too large");
+    return;
+  }
+
+  // Validate topic length
+  if (strlen(topic) > 64) {
+    mqttDebug("MQTT topic too long");
+    return;
+  }
+
   String topicStr = String(topic);
   String payloadStr = "";
+  payloadStr.reserve(length + 1);  // Pre-allocate to avoid fragmentation
 
   for (unsigned int i = 0; i < length; i++) {
     payloadStr += (char)payload[i];
@@ -794,35 +845,94 @@ void updateLedAnimations() {
   }
 }
 
+// v1.4 Phase 7: Enhanced color parsing with validation
 void parseColor(String hexColor, uint8_t& r, uint8_t& g, uint8_t& b) {
-  if (hexColor.length() < 7 || hexColor[0] != '#') return;
+  // Validate format: #RRGGBB
+  if (hexColor.length() != 7 || hexColor[0] != '#') {
+    mqttDebug("Invalid color format");
+    return;
+  }
 
-  r = strtol(hexColor.substring(1, 3).c_str(), NULL, 16);
-  g = strtol(hexColor.substring(3, 5).c_str(), NULL, 16);
-  b = strtol(hexColor.substring(5, 7).c_str(), NULL, 16);
+  // Validate hex characters
+  for (int i = 1; i < 7; i++) {
+    char c = hexColor[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) {
+      mqttDebug("Invalid hex character in color");
+      return;
+    }
+  }
+
+  // Parse with error checking
+  char* endPtr;
+  long rVal = strtol(hexColor.substring(1, 3).c_str(), &endPtr, 16);
+  if (*endPtr != '\0') return;
+
+  long gVal = strtol(hexColor.substring(3, 5).c_str(), &endPtr, 16);
+  if (*endPtr != '\0') return;
+
+  long bVal = strtol(hexColor.substring(5, 7).c_str(), &endPtr, 16);
+  if (*endPtr != '\0') return;
+
+  // Clamp to valid range (0-255)
+  r = constrain(rVal, 0, 255);
+  g = constrain(gVal, 0, 255);
+  b = constrain(bVal, 0, 255);
 }
 
 // ==================== THRESHOLDS & AUTO CONTROL (v1.4 Phase 5) ====================
+// v1.4 Phase 7: Enhanced LittleFS error handling
 void loadThresholds() {
-  File file = LittleFS.open("/thresholds.json", "r");
-  if (file) {
-    StaticJsonDocument<256> doc;
-    DeserializationError error = deserializeJson(doc, file);
+  if (!LittleFS.begin()) {
+    mqttDebug("LittleFS mount failed - using defaults");
+    useDefaults = true;
+    publishThresholds();
+    return;
+  }
 
-    if (!error) {
-      thresholds.temp_max = doc["temp_max"] | 35.0;
-      thresholds.temp_min = doc["temp_min"] | 15.0;
-      thresholds.hum_max = doc["hum_max"] | 80.0;
-      thresholds.hum_min = doc["hum_min"] | 40.0;
-      thresholds.soil_min = doc["soil_min"] | 30.0;
-      thresholds.flame_threshold = doc["flame_threshold"] | 800;
-      thresholds.sound_threshold = doc["sound_threshold"] | 700;
-      useDefaults = false;
-      mqttDebug("Thresholds loaded from file");
-    }
+  File file = LittleFS.open("/thresholds.json", "r");
+  if (!file) {
+    mqttDebug("Thresholds file not found - using defaults");
+    useDefaults = true;
+    publishThresholds();
+    return;
+  }
+
+  // Check file size (must be > 0 and < 1KB)
+  size_t fileSize = file.size();
+  if (fileSize == 0 || fileSize > 1024) {
+    mqttDebug("Invalid threshold file size");
     file.close();
+    useDefaults = true;
+    publishThresholds();
+    return;
+  }
+
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();  // Close immediately after reading
+
+  if (error) {
+    mqttDebug("Threshold JSON parse error");
+    useDefaults = true;
   } else {
-    mqttDebug("Using default thresholds");
+    // Load with validation
+    thresholds.temp_max = doc["temp_max"] | 35.0;
+    thresholds.temp_min = doc["temp_min"] | 15.0;
+    thresholds.hum_max = doc["hum_max"] | 80.0;
+    thresholds.hum_min = doc["hum_min"] | 40.0;
+    thresholds.soil_min = doc["soil_min"] | 30.0;
+    thresholds.flame_threshold = doc["flame_threshold"] | 800;
+    thresholds.sound_threshold = doc["sound_threshold"] | 700;
+
+    // Sanity checks
+    if (thresholds.temp_max <= thresholds.temp_min) {
+      mqttDebug("Invalid temp thresholds - using defaults");
+      thresholds.temp_max = 35.0;
+      thresholds.temp_min = 15.0;
+    }
+
+    useDefaults = false;
+    mqttDebug("Thresholds loaded from file");
   }
 
   // Publish current thresholds
