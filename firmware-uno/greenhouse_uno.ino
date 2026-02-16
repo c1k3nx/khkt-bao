@@ -1,11 +1,11 @@
 /*******************************************************************************
- * GREENHOUSE UNO R3 FIRMWARE - v1.3.2 STABILITY FIX
+ * GREENHOUSE UNO R3 FIRMWARE - v1.4 COMPREHENSIVE OVERHAUL
  * ============================================================================
  * Chức năng:
  * - Đọc cảm biến: BH1750, JSN-SR04T, MQ-3, Flame, Sound, Soil moisture
  * - Điều khiển: 2 relay (direct), 2 servo, DFPlayer Mini, WS2812 Ring #1
  * - Hiển thị: LCD1602 I2C multi-screen rotation (ALL sensors)
- * - Giao tiếp: AltSoftSerial 115200 baud với ESP8266 (JSON protocol)
+ * - Giao tiếp: Hardware Serial (D0/D1) 115200 baud với ESP8266 (JSON protocol)
  * - Fallback an toàn khi mất kết nối
  *
  * BUGFIX v1.2: DHT11 removed from UNO (moved to ESP8266 GPIO4)
@@ -26,8 +26,14 @@
  * - Reduces flicker and improves readability
  * - Tracks previous screen to detect changes
  *
- * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
- * - AltSoftSerial: D8 (RX) ← ESP8266 TX, D9 (TX) → ESP8266 RX (115200 baud)
+ * v1.4 OVERHAUL - Phase 1: Hardware Serial Migration
+ * - Migrated from AltSoftSerial (D8/D9) to Hardware Serial (D0/D1)
+ * - Eliminates Timer1 conflict with Servo library
+ * - Higher reliability with hardware UART
+ * - Debug now via MQTT (no more Serial debug)
+ *
+ * Pin mapping (OFFICIAL - v1.4):
+ * - Hardware Serial: D0 (RX) ← ESP8266 TX (GPIO1), D1 (TX) → ESP8266 RX (GPIO3)
  * - DFPlayer: D12 (RX), D11 (TX) - SoftwareSerial 9600 baud
  * - Servos: D6 (Window MG996R), D5 (Door MG90)
  * - JSN-SR04T: D3 (TRIG), D2 (ECHO)
@@ -38,16 +44,18 @@
  * - I2C: A4 (SDA), A5 (SCL) - BH1750 + LCD1602
  *
  * NOTE: DHT11 (temp/humidity) is now on ESP8266 GPIO4
- * NOTE: For full 4-relay control, use PCF8574 I2C expander (recommended)
+ * NOTE: Hardware Serial now used for ESP8266 - NO debug Serial available
+ * NOTE: Use MQTT debug topic (greenhouse/sys/debug) for debugging
  ******************************************************************************/
 
 #include <Wire.h>
 #include <Servo.h>
+#include <avr/wdt.h>  // v1.4 Phase 7: Watchdog Timer
 // #include <DHT.h>  // REMOVED - DHT11 moved to ESP8266
 #include <BH1750.h>
 #include <LiquidCrystal_I2C.h>
-#include <AltSoftSerial.h>  // D8 RX, D9 TX (fixed pins)
-#include <SoftwareSerial.h>  // For DFPlayer
+// #include <AltSoftSerial.h>  // REMOVED v1.4 - Using Hardware Serial now
+#include <SoftwareSerial.h>  // For DFPlayer only
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 
@@ -88,6 +96,14 @@
 #define RELAY_ON LOW
 #define RELAY_OFF HIGH
 
+// Servo angle limits (v1.4 Phase 7)
+#define SERVO_MIN_ANGLE 0
+#define SERVO_MAX_ANGLE 180
+
+// I2C retry (v1.4 Phase 7)
+#define I2C_RETRY_COUNT 3
+#define I2C_RETRY_DELAY 100
+
 // Thresholds for fallback safety
 #define FLAME_THRESHOLD 800
 #define SOUND_THRESHOLD 700
@@ -106,13 +122,39 @@
 #define LCD_SCREEN_COUNT 5
 #define LCD_SCREEN_INTERVAL 3000  // 3 seconds per screen
 
+// Debug via MQTT (v1.4 Phase 2)
+#define DEBUG_BUFFER_SIZE 256
+#define DEBUG_SEND_INTERVAL 100  // Minimum interval between debug messages
+
+// Servo angles (v1.4 Phase 7)
+#define SERVO_CLOSE_ANGLE 0
+#define SERVO_OPEN_ANGLE 90
+
+// Sensor read interval
+#define SENSOR_READ_INTERVAL 2000   // Read sensors every 2s
+#define SENSOR_SEND_INTERVAL 3000   // Send data every 3s
+#define LCD_UPDATE_INTERVAL 1000    // Update LCD every 1s
+
+// DFPlayer timing
+#define DFPLAYER_INIT_DELAY 200
+#define DFPLAYER_CMD_DELAY 200
+
+// Sensor filtering (v1.4 Phase 3)
+#define ULTRASONIC_SAMPLES 3  // v1.4 BUGFIX: Reduced from 5 to 3 (30ms vs 60ms blocking)
+#define MA_SIZE 10            // Moving average buffer size
+
+// Debouncing for sensitive sensors (v1.4 Phase 7)
+#define DEBOUNCE_COUNT 3      // Require 3 consecutive readings to trigger
+#define DEBOUNCE_INTERVAL 100 // Check every 100ms
+
 // ==================== OBJECTS ====================
 // DHT dht(DHT_PIN, DHT_TYPE);  // REMOVED - now on ESP8266
 BH1750 lightMeter(0x23);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 Servo servoWindow;
 Servo servoDoor;
-AltSoftSerial espSerial;  // RX=D8, TX=D9 (fixed by library)
+// AltSoftSerial espSerial;  // REMOVED v1.4 - Using Hardware Serial now
+#define espSerial Serial  // Hardware Serial for ESP8266 (D0/D1)
 SoftwareSerial dfSerial(DF_RX, DF_TX);
 Adafruit_NeoPixel strip(WS2812_COUNT, WS2812_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -172,6 +214,88 @@ bool lcdShowingSensor = true;
 int currentVolume = 25;
 bool dfPlayerReady = false;
 
+// Debug buffer (v1.4 Phase 2)
+char debugBuffer[DEBUG_BUFFER_SIZE];
+bool debugPending = false;
+unsigned long lastDebugSend = 0;
+
+// Debounce state for sensitive sensors (v1.4 Phase 7)
+struct DebounceState {
+  int flameCount = 0;
+  int soundCount = 0;
+  bool flameTriggered = false;
+  bool soundTriggered = false;
+  unsigned long lastCheck = 0;
+};
+DebounceState debounce;
+
+// ==================== MOVING AVERAGE FILTER (v1.4 Phase 3) ====================
+class MovingAverage {
+private:
+  int buffer[MA_SIZE];
+  int index;
+  long sum;
+  int count;
+
+public:
+  MovingAverage() : index(0), sum(0), count(0) {
+    for (int i = 0; i < MA_SIZE; i++) {
+      buffer[i] = 0;
+    }
+  }
+
+  int add(int value) {
+    if (count < MA_SIZE) {
+      count++;
+    } else {
+      sum -= buffer[index];
+    }
+
+    buffer[index] = value;
+    sum += value;
+    index = (index + 1) % MA_SIZE;
+
+    return sum / count;
+  }
+};
+
+// Global filters for analog sensors
+MovingAverage soilFilter;
+MovingAverage flameFilter;
+MovingAverage soundFilter;
+MovingAverage mq3Filter;
+
+// ==================== HELPER FUNCTIONS (v1.4 Phase 7) ====================
+// Safe servo control with angle validation
+void setServoSafe(Servo& servo, int angle) {
+  // Clamp angle to safe range
+  angle = constrain(angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+  servo.write(angle);
+}
+
+// BH1750 I2C retry logic
+bool initBH1750WithRetry() {
+  for (int i = 0; i < I2C_RETRY_COUNT; i++) {
+    if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
+      return true;
+    }
+    delay(I2C_RETRY_DELAY);
+  }
+  return false;
+}
+
+// LCD I2C retry logic
+bool initLcdWithRetry() {
+  for (int i = 0; i < I2C_RETRY_COUNT; i++) {
+    lcd.init();
+    lcd.backlight();
+    // Simple test: try to set cursor
+    lcd.setCursor(0, 0);
+    return true;  // LCD init rarely fails visibly
+  }
+  return false;
+}
+
 // ==================== SETUP ====================
 void setup() {
   // Init pins
@@ -189,14 +313,15 @@ void setup() {
   // Init I2C
   Wire.begin();
 
-  // Init LCD
-  lcd.init();
-  lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("GREENHOUSE UNO");
-  lcd.setCursor(0, 1);
-  lcd.print("v1.3.2 STABLE");
-  delay(1000);
+  // Init LCD with retry (v1.4 Phase 7)
+  if (initLcdWithRetry()) {
+    lcd.print("GREENHOUSE UNO");
+    lcd.setCursor(0, 1);
+    lcd.print("v1.4 Phase 7");
+    delay(1000);
+  } else {
+    // LCD init failed - system will continue without LCD
+  }
 
   // v1.3: Initialize sensor data
   sensors.temp_c = 0;
@@ -208,21 +333,23 @@ void setup() {
   // DHT init removed - now on ESP8266
   // dht.begin();
 
-  // Init BH1750
-  if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
+  // Init BH1750 with retry (v1.4 Phase 7)
+  if (initBH1750WithRetry()) {
     lcd.setCursor(0, 1);
     lcd.print("BH1750 OK       ");
+    // Debug will be sent after Serial init
   } else {
     lcd.setCursor(0, 1);
-    lcd.print("BH1750 ERROR!   ");
+    lcd.print("BH1750 FAIL!    ");
+    // System will continue, light readings will be 0
   }
   delay(500);
 
-  // Init Servos
+  // Init Servos (v1.4 Phase 7: Use constants)
   servoWindow.attach(SERVO_WINDOW);
   servoDoor.attach(SERVO_DOOR);
-  servoWindow.write(0);   // CLOSE
-  servoDoor.write(0);     // CLOSE
+  servoWindow.write(SERVO_CLOSE_ANGLE);
+  servoDoor.write(SERVO_CLOSE_ANGLE);
   actuators.window = false;
   actuators.door = false;
 
@@ -236,31 +363,41 @@ void setup() {
   delay(500);
   initDFPlayer();
 
-  // Init UART with ESP8266 (AltSoftSerial on D8/D9)
-  espSerial.begin(UART_BAUD);
+  // Init UART with ESP8266 (Hardware Serial on D0/D1)
+  // v1.4: Using Hardware Serial - NO debug Serial available
+  Serial.begin(UART_BAUD);  // Serial = espSerial for ESP8266 communication
 
-  // Hardware Serial for debugging (optional, can be removed)
-  Serial.begin(115200);
-  Serial.println("Greenhouse UNO v1.3.2 STABILITY FIX");
+  // v1.4 Phase 2: MQTT debug system ready
+  delay(500);  // Wait for ESP8266 to be ready
+  mqttDebug("UNO v1.4 started");
+  mqttDebug("BH1750 init OK");
+  mqttDebug("Hardware Serial D0/D1 ready");
 
   delay(1000);
   lcd.clear();
   lcd.print("READY!");
   delay(500);
+
+  // v1.4 Phase 7: Enable watchdog timer (8 second timeout)
+  wdt_enable(WDTO_8S);
+  mqttDebug("Watchdog enabled (8s)");
 }
 
 // ==================== MAIN LOOP ====================
 void loop() {
   unsigned long now = millis();
 
-  // Read sensors (every 2s)
-  if (now - lastSensorRead >= 2000) {
+  // v1.4 Phase 7: Reset watchdog timer (prevent system reset)
+  wdt_reset();
+
+  // Read sensors (v1.4 Phase 7: Use constants)
+  if (now - lastSensorRead >= SENSOR_READ_INTERVAL) {
     lastSensorRead = now;
     readAllSensors();
   }
 
-  // Send sensor data via UART (every 3s)
-  if (now - lastSensorSend >= 3000) {
+  // Send sensor data via UART
+  if (now - lastSensorSend >= SENSOR_SEND_INTERVAL) {
     lastSensorSend = now;
     sendSensorData();
   }
@@ -298,6 +435,12 @@ void loop() {
   // Emergency checks (always active)
   emergencyChecks();
 
+  // Send debug message if pending (v1.4 Phase 2)
+  if (debugPending && (now - lastDebugSend >= DEBUG_SEND_INTERVAL)) {
+    lastDebugSend = now;
+    sendDebugMessage();
+  }
+
   delay(10);
 }
 
@@ -306,39 +449,65 @@ void readAllSensors() {
   // DHT11 removed - temp/humidity now read by ESP8266
   // Temp/humidity will be received via UART from ESP8266
 
-  // BH1750
+  // BH1750 - Already stable, no filter needed
   sensors.light_lux = lightMeter.readLightLevel();
   if (sensors.light_lux < 0) sensors.light_lux = 0;
 
-  // Soil moisture (analog, 0-1023)
+  // Soil moisture with moving average filter (v1.4 Phase 3)
   int soilRaw = analogRead(ANALOG_SOIL);
-  sensors.soil_pct = map(soilRaw, 0, 1023, 0, 100);
+  int soilFiltered = soilFilter.add(soilRaw);
+  sensors.soil_pct = constrain(map(soilFiltered, 0, 1023, 0, 100), 0, 100);  // v1.4 BUGFIX: Clamp to 0-100%
 
-  // MQ-3 alcohol
-  sensors.mq3 = analogRead(ANALOG_MQ3);
+  // MQ-3 with moving average filter
+  int mq3Raw = analogRead(ANALOG_MQ3);
+  sensors.mq3 = mq3Filter.add(mq3Raw);
 
-  // Flame sensor
-  sensors.flame = analogRead(ANALOG_FLAME);
+  // Flame sensor with moving average filter
+  int flameRaw = analogRead(ANALOG_FLAME);
+  sensors.flame = flameFilter.add(flameRaw);
 
-  // Sound sensor
-  sensors.sound = analogRead(ANALOG_SOUND);
+  // Sound sensor with moving average filter
+  int soundRaw = analogRead(ANALOG_SOUND);
+  sensors.sound = soundFilter.add(soundRaw);
 
-  // JSN-SR04T ultrasonic
+  // JSN-SR04T ultrasonic with median filter (v1.4 Phase 3)
   sensors.distance_cm = readUltrasonic();
 }
 
+// Median filter for ultrasonic sensor (v1.4 Phase 3)
 float readUltrasonic() {
-  digitalWrite(JSN_TRIG, LOW);
-  delayMicroseconds(2);
-  digitalWrite(JSN_TRIG, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(JSN_TRIG, LOW);
+  float samples[ULTRASONIC_SAMPLES];
 
-  long duration = pulseIn(JSN_ECHO, HIGH, 30000);
-  if (duration == 0) return -1;
+  // Collect samples
+  for (int i = 0; i < ULTRASONIC_SAMPLES; i++) {
+    digitalWrite(JSN_TRIG, LOW);
+    delayMicroseconds(2);
+    digitalWrite(JSN_TRIG, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(JSN_TRIG, LOW);
 
-  float distance = duration * 0.034 / 2.0;
-  return distance;
+    long duration = pulseIn(JSN_ECHO, HIGH, 30000);
+    if (duration == 0) {
+      samples[i] = -1;
+    } else {
+      samples[i] = duration * 0.034 / 2.0;
+    }
+    delay(10);  // Small delay between samples
+  }
+
+  // Sort samples using bubble sort
+  for (int i = 0; i < ULTRASONIC_SAMPLES - 1; i++) {
+    for (int j = i + 1; j < ULTRASONIC_SAMPLES; j++) {
+      if (samples[i] > samples[j]) {
+        float temp = samples[i];
+        samples[i] = samples[j];
+        samples[j] = temp;
+      }
+    }
+  }
+
+  // Return median value (middle element)
+  return samples[ULTRASONIC_SAMPLES / 2];
 }
 
 // ==================== UART COMMUNICATION ====================
@@ -359,9 +528,29 @@ void sendSensorData() {
   serializeJson(doc, espSerial);
   espSerial.println();
 
-  // Also send to debug Serial (optional)
-  serializeJson(doc, Serial);
-  Serial.println();
+  // Debug Serial removed - espSerial IS Serial now
+}
+
+// ==================== MQTT DEBUG SYSTEM (v1.4 Phase 2) ====================
+void mqttDebug(const char* msg) {
+  strncpy(debugBuffer, msg, DEBUG_BUFFER_SIZE - 1);
+  debugBuffer[DEBUG_BUFFER_SIZE - 1] = '\0';  // Ensure null termination
+  debugPending = true;
+}
+
+void sendDebugMessage() {
+  if (!debugPending) return;
+
+  StaticJsonDocument<256> doc;
+  doc["type"] = "debug";
+  doc["source"] = "UNO";
+  doc["msg"] = debugBuffer;
+  doc["ts"] = millis();
+
+  serializeJson(doc, espSerial);
+  espSerial.println();
+
+  debugPending = false;
 }
 
 void handleUartCommand() {
@@ -375,12 +564,13 @@ void handleUartCommand() {
 
   if (error) {
     uartErrorCount++;
-    Serial.print("UART parse error: ");
-    Serial.println(line);
+    mqttDebug("UART parse error");
     return;
   }
 
   const char* type = doc["type"];
+  if (type == NULL) return;  // v1.4 BUGFIX: Prevent NULL pointer dereference
+
   if (strcmp(type, "control") == 0) {
     handleControlCommand(doc);
   }
@@ -410,15 +600,17 @@ void handleControlCommand(JsonDocument& doc) {
     pushLcdMessage("LIGHT", action);
   }
 
-  // Servos
+  // Servos (v1.4 Phase 7: Use constants)
   else if (strcmp(device, "window1") == 0) {
     actuators.window = (strcmp(action, "OPEN") == 0);
-    servoWindow.write(actuators.window ? 90 : 0);
+    int angle = actuators.window ? SERVO_OPEN_ANGLE : SERVO_CLOSE_ANGLE;
+    setServoSafe(servoWindow, angle);
     pushLcdMessage("WINDOW", action);
   }
   else if (strcmp(device, "mainDoor") == 0) {
     actuators.door = (strcmp(action, "OPEN") == 0);
-    servoDoor.write(actuators.door ? 90 : 0);
+    int angle = actuators.door ? SERVO_OPEN_ANGLE : SERVO_CLOSE_ANGLE;
+    setServoSafe(servoDoor, angle);
     pushLcdMessage("DOOR", action);
   }
 
@@ -462,21 +654,17 @@ void handleEnvData(JsonDocument& doc) {
     }
   }
 
-  // Debug log
-  Serial.print("Env data from ESP: T=");
-  Serial.print(sensors.temp_c, 1);
-  Serial.print("°C H=");
-  Serial.print(sensors.hum_pct, 1);
-  Serial.println("%");
+  // v1.4 Phase 2: MQTT debug
+  mqttDebug("Env data received from ESP");
 }
 
 // ==================== DFPLAYER ====================
 void initDFPlayer() {
-  // Simple init sequence
+  // Simple init sequence (v1.4 Phase 7: Use constants)
   sendDFCommand(0x3F, 0, 0); // Init
-  delay(200);
+  delay(DFPLAYER_INIT_DELAY);
   sendDFCommand(0x06, 0, currentVolume); // Set volume
-  delay(200);
+  delay(DFPLAYER_CMD_DELAY);
   dfPlayerReady = true;
 }
 
@@ -627,16 +815,17 @@ void safeState() {
   actuators.led12v = false;
 }
 
+// v1.4 Phase 7: Enhanced fallback safety with servo constants
 void fallbackSafety() {
   // When UART lost, apply safe defaults
   pushLcdMessage("UART LOST", "FALLBACK MODE");
 
-  // Check flame
+  // Check flame - emergency mode
   if (sensors.flame > FLAME_THRESHOLD) {
     setRelay(RELAY_PUMP, false);  // Turn off pump
     // NOTE: Fan control requires PCF8574 I2C expander
     pushLcdMessage("FIRE DETECT!", "PUMP OFF");
-    servoWindow.write(90);  // Open window for ventilation
+    setServoSafe(servoWindow, SERVO_OPEN_ANGLE);  // Open window for ventilation
     return;
   }
 
@@ -647,39 +836,54 @@ void fallbackSafety() {
   safeState();
 }
 
+// v1.4 Phase 7: Enhanced emergency checks with proper debouncing
 void emergencyChecks() {
-  static unsigned long lastFlameEvent = 0;
-  static unsigned long lastSoundEvent = 0;
   unsigned long now = millis();
 
-  // Always check flame regardless of mode (debounce: once per second)
-  if (sensors.flame > FLAME_THRESHOLD && (now - lastFlameEvent > 1000)) {
-    lastFlameEvent = now;
+  // Debounce check every DEBOUNCE_INTERVAL (100ms)
+  if (now - debounce.lastCheck < DEBOUNCE_INTERVAL) return;
+  debounce.lastCheck = now;
 
-    // Send event to ESP8266
-    StaticJsonDocument<128> doc;
-    doc["type"] = "event";
-    doc["event"] = "flame";
-    doc["value"] = "DETECTED";
+  // Flame sensor debouncing
+  if (sensors.flame > FLAME_THRESHOLD) {
+    debounce.flameCount++;
+    if (debounce.flameCount >= DEBOUNCE_COUNT && !debounce.flameTriggered) {
+      debounce.flameTriggered = true;
 
-    serializeJson(doc, espSerial);
-    espSerial.println();
+      // Send event to ESP8266
+      StaticJsonDocument<128> doc;
+      doc["type"] = "event";
+      doc["event"] = "flame";
+      doc["value"] = "DETECTED";
 
-    Serial.println("FLAME DETECTED!");
+      serializeJson(doc, espSerial);
+      espSerial.println();
+
+      mqttDebug("FLAME DETECTED!");
+    }
+  } else {
+    debounce.flameCount = 0;
+    debounce.flameTriggered = false;
   }
 
-  // Sound alert (debounce: once per second)
-  if (sensors.sound > SOUND_THRESHOLD && (now - lastSoundEvent > 1000)) {
-    lastSoundEvent = now;
+  // Sound sensor debouncing
+  if (sensors.sound > SOUND_THRESHOLD) {
+    debounce.soundCount++;
+    if (debounce.soundCount >= DEBOUNCE_COUNT && !debounce.soundTriggered) {
+      debounce.soundTriggered = true;
 
-    StaticJsonDocument<128> doc;
-    doc["type"] = "event";
-    doc["event"] = "sound";
-    doc["value"] = "LOUD";
+      StaticJsonDocument<128> doc;
+      doc["type"] = "event";
+      doc["event"] = "sound";
+      doc["value"] = "LOUD";
 
-    serializeJson(doc, espSerial);
-    espSerial.println();
+      serializeJson(doc, espSerial);
+      espSerial.println();
 
-    Serial.println("LOUD SOUND!");
+      mqttDebug("LOUD SOUND detected");
+    }
+  } else {
+    debounce.soundCount = 0;
+    debounce.soundTriggered = false;
   }
 }

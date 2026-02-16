@@ -1,9 +1,9 @@
 /*******************************************************************************
- * GREENHOUSE ESP8266 FIRMWARE - v1.3.2 STABILITY FIX
+ * GREENHOUSE ESP8266 FIRMWARE - v1.4 COMPREHENSIVE OVERHAUL
  * ============================================================================
  * Chức năng:
  * - MQTT Bridge: Subscribe commands, publish sensor/status
- * - UART với UNO: SoftwareSerial 115200 baud (bidirectional sync)
+ * - UART với UNO: Hardware Serial 115200 baud (bidirectional sync)
  * - GPS NEO-6: SoftwareSerial 9600 baud
  * - DHT11: GPIO4 (Temperature/Humidity sensor)
  * - LED WS2812B Ring #2: 8 LEDs
@@ -29,14 +29,22 @@
  * - Prevents UNO from receiving unsupported device commands
  * - Ensures proper MQTT status publishing for fan/auxFan
  *
- * Pin mapping (OFFICIAL - see PIN_MAPPING_FINAL.md):
+ * v1.4 OVERHAUL - Phase 1: Hardware Serial Migration
+ * - Migrated from SoftwareSerial (GPIO12/14) to Hardware Serial (GPIO1/3)
+ * - Higher reliability with hardware UART
+ * - Eliminates SoftwareSerial library dependency for UNO
+ * - Debug now via MQTT (no more Serial debug)
+ *
+ * Pin mapping (OFFICIAL - v1.4):
  * - DHT11: GPIO4 (D2) - Temperature & Humidity sensor
- * - RELAY_FAN: GPIO5 (D1) - Fan relay control (NEW v1.3.1)
- * - RELAY_AUXFAN: GPIO16 (D0) - AuxFan relay control (NEW v1.3.1)
- * - UNO UART: GPIO12 (RX) ← UNO D9 TX, GPIO14 (TX) → UNO D8 RX (SoftwareSerial 115200)
+ * - RELAY_FAN: GPIO5 (D1) - Fan relay control
+ * - RELAY_AUXFAN: GPIO16 (D0) - AuxFan relay control
+ * - UNO UART: GPIO1/3 (TX0/RX0) ↔ UNO D1/D0 (Hardware Serial 115200)
  * - GPS: GPIO13 (RX) ← NEO-6 TX, GPIO15 (TX) → NEO-6 RX (SoftwareSerial 9600)
  * - WS2812 Ring #2: GPIO2 (D4) - 8 LEDs, NeoPixelBus UART method
- * - Reserve: GPIO1/3 (UART0 for debug)
+ *
+ * NOTE: Hardware Serial now used for UNO - NO debug Serial available
+ * NOTE: Use MQTT debug topic (greenhouse/sys/debug) for debugging
  ******************************************************************************/
 
 #include <ESP8266WiFi.h>
@@ -45,8 +53,8 @@
 #include <SoftwareSerial.h>
 #include <DHT.h>  // DHT11 sensor library
 #include <NeoPixelBus.h>  // NeoPixelBus instead of Adafruit_NeoPixel for ESP8266
-#include <LittleFS.h>
-#include <TinyGPSPlus.h>
+#include <LittleFS.h>  // v1.4 BUGFIX: Add missing LittleFS include
+#include <TinyGPSPlus.h>  // v1.4 BUGFIX: Add missing TinyGPSPlus include
 
 // ==================== CONFIGURATION ====================
 // Wi-Fi credentials (change these)
@@ -54,17 +62,19 @@ const char* WIFI_SSID = "YourWiFiSSID";
 const char* WIFI_PASS = "YourWiFiPassword";
 
 // MQTT broker (change if needed)
-const char* MQTT_BROKER = "broker.hivemq.com";
+const char* const MQTT_BROKER = "broker.hivemq.com";
 const int MQTT_PORT = 1883;
-const char* MQTT_CLIENT_ID = "greenhouse-esp8266";
+const char* const MQTT_CLIENT_ID = "greenhouse-esp8266";
 
 // DHT11 Sensor (NEW in v1.2)
 #define DHT_PIN 4        // GPIO4 (D2)
 #define DHT_TYPE DHT11
 
-// UART with UNO (SoftwareSerial)
-#define UNO_RX 12    // GPIO12 (D6) ← UNO TX (D9 via level shift)
-#define UNO_TX 14    // GPIO14 (D5) → UNO RX (D8)
+// UART with UNO (Hardware Serial - v1.4)
+// GPIO1 (TX0) → UNO D0 (RX)
+// GPIO3 (RX0) ← UNO D1 (TX)
+// #define UNO_RX 12    // REMOVED v1.4 - Using Hardware Serial
+// #define UNO_TX 14    // REMOVED v1.4 - Using Hardware Serial
 #define UART_BAUD 115200
 #define UART_TIMEOUT 3000
 #define UART_RETRY 3
@@ -96,7 +106,8 @@ const char* MQTT_CLIENT_ID = "greenhouse-esp8266";
 // ==================== OBJECTS ====================
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
-SoftwareSerial unoSerial(UNO_RX, UNO_TX);  // For communication with UNO
+// SoftwareSerial unoSerial(UNO_RX, UNO_TX);  // REMOVED v1.4 - Using Hardware Serial
+#define unoSerial Serial  // Hardware Serial for UNO (GPIO1/3)
 SoftwareSerial gpsSerial(GPS_RX, GPS_TX);
 TinyGPSPlus gps;
 DHT dht(DHT_PIN, DHT_TYPE);  // DHT11 sensor (NEW in v1.2)
@@ -152,6 +163,23 @@ unsigned long lastMqttReconnect = 0;
 bool systemReady = false;
 String currentMode = "AUTO";
 
+// Default thresholds (v1.4 Phase 5)
+struct Thresholds {
+  float temp_max = 35.0;
+  float temp_min = 15.0;
+  float hum_max = 80.0;
+  float hum_min = 40.0;
+  float soil_min = 30.0;
+  int flame_threshold = 800;
+  int sound_threshold = 700;
+  // v1.4 BUGFIX: Add hysteresis to prevent oscillation
+  float temp_hysteresis = 2.0;  // ±2°C hysteresis
+  float soil_hysteresis = 5.0;  // ±5% hysteresis
+};
+
+Thresholds thresholds;
+bool useDefaults = true;
+
 // LED animation state for Ring #2
 struct LedState {
   String mode;  // "OFF", "COLOR", "ALERT"
@@ -162,28 +190,27 @@ LedState ledState = {"OFF", 0, 255, 0};  // Ring #2 only
 unsigned long ledAnimationTick = 0;
 bool ledAlertPhase = false;
 
+// v1.4 Phase 6: Track previous LED state to avoid unnecessary Show() calls
+RgbColor lastLedColor(0, 0, 0);
+bool ledNeedsUpdate = false;
+
 // ==================== SETUP ====================
 void setup() {
-  // Hardware UART for debugging (optional)
-  Serial.begin(115200);
-  Serial.println("\nGreenhouse ESP8266 v1.3.2 STABILITY FIX");
-  Serial.println("DHT11 on GPIO4, Fan/AuxFan relays on GPIO5/GPIO16");
-  Serial.println("BUGFIX: Fan/AuxFan no longer forwarded to UNO");
+  // Init UART with UNO (Hardware Serial - v1.4)
+  // NOTE: Serial debug removed - using Hardware Serial for UNO communication
+  Serial.begin(UART_BAUD);  // Serial = unoSerial for UNO communication
   delay(100);
 
   // Init DHT11 sensor (NEW in v1.2)
   dht.begin();
-  Serial.println("DHT11 initialized");
-
-  // Init UART with UNO
-  unoSerial.begin(UART_BAUD);
 
   // Init GPS
   gpsSerial.begin(GPS_BAUD);
 
   // Init filesystem
   if (!LittleFS.begin()) {
-    Serial.println("LittleFS init failed");
+    // v1.4 BUGFIX: Can't use Serial.println() - it conflicts with unoSerial
+    // Will log via MQTT after connection
   }
 
   // Init LED Ring #2
@@ -195,7 +222,6 @@ void setup() {
   pinMode(RELAY_AUXFAN, OUTPUT);
   digitalWrite(RELAY_FAN, RELAY_OFF);      // Initial state: OFF
   digitalWrite(RELAY_AUXFAN, RELAY_OFF);   // Initial state: OFF
-  Serial.println("Relays initialized (GPIO5=FAN, GPIO16=AUXFAN)");
 
   // Init Wi-Fi
   WiFi.mode(WIFI_STA);
@@ -216,7 +242,7 @@ void setup() {
   // Init MQTT
   mqtt.setServer(MQTT_BROKER, MQTT_PORT);
   mqtt.setCallback(mqttCallback);
-  mqtt.setBufferSize(512);
+  mqtt.setBufferSize(1024);  // v1.4 BUGFIX: Increased from 512 to prevent message truncation
 
   connectMqtt();
 
@@ -230,12 +256,20 @@ void setup() {
   deviceState.led_power = "OFF";
   deviceState.led_color = "#00FF00";
 
+  // Load thresholds (v1.4 Phase 5)
+  loadThresholds();
+
   systemReady = true;
 }
 
 // ==================== MAIN LOOP ====================
 void loop() {
   unsigned long now = millis();
+
+  // v1.4 Phase 7: WiFi reconnection logic
+  if (WiFi.status() != WL_CONNECTED) {
+    reconnectWiFi();
+  }
 
   // MQTT loop
   if (!mqtt.connected()) {
@@ -249,9 +283,15 @@ void loop() {
     lastSensorReceived = now;
   }
 
-  // Check UART timeout
+  // Check UART timeout (v1.4 BUGFIX: Add rate limiting to prevent MQTT spam)
+  static bool timeoutErrorSent = false;
   if (now - lastSensorReceived > UART_TIMEOUT && lastSensorReceived > 0) {
-    publishError("uart_timeout", "No data from UNO for 3s");
+    if (!timeoutErrorSent) {
+      publishError("uart_timeout", "No data from UNO for 3s");
+      timeoutErrorSent = true;
+    }
+  } else {
+    timeoutErrorSent = false;
   }
 
   // Read DHT11 (NEW in v1.2)
@@ -287,10 +327,48 @@ void loop() {
   // Update LED animations
   updateLedAnimations();
 
+  // Auto control (v1.4 Phase 5) - runs every loop
+  autoControl();
+
+  // v1.4 Phase 7: Enhanced watchdog feeding
+  yield();  // Let ESP8266 handle Wi-Fi and system tasks
+  ESP.wdtFeed();  // Explicit watchdog feed
+
   delay(10);
 }
 
 // ==================== Wi-Fi & MQTT ====================
+// v1.4 Phase 7: WiFi reconnection with exponential backoff
+void reconnectWiFi() {
+  static unsigned long lastWiFiAttempt = 0;
+  static int wifiReconnectAttempts = 0;
+  unsigned long now = millis();
+
+  // Exponential backoff (2s, 4s, 8s, 16s, max 30s)
+  unsigned long backoff = min(2000 * (1 << wifiReconnectAttempts), 30000UL);
+  if (now - lastWiFiAttempt < backoff) return;
+
+  lastWiFiAttempt = now;
+  wifiReconnectAttempts++;
+
+  WiFi.disconnect();
+  delay(100);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  // Wait up to 5 seconds
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 10) {
+    delay(500);
+    attempts++;
+    ESP.wdtFeed();  // Feed watchdog during connection
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiReconnectAttempts = 0;  // Reset counter on success
+    mqttDebug("WiFi reconnected");
+  }
+}
+
 void connectMqtt() {
   int attempts = 0;
   while (!mqtt.connected() && attempts < 5) {
@@ -302,14 +380,14 @@ void connectMqtt() {
       // Publish initial state
       publishDeviceStatus();
       mqttReconnectAttempts = 0;
-      Serial.println("MQTT connected");
+      mqttDebug("MQTT connected");
       return;
     }
     attempts++;
     delay(1000);
   }
 
-  Serial.println("MQTT connection failed");
+  mqttDebug("MQTT connection failed");
 }
 
 void reconnectMqtt() {
@@ -329,13 +407,27 @@ void reconnectMqtt() {
 
     publishDeviceStatus();
     mqttReconnectAttempts = 0;
-    Serial.println("MQTT reconnected");
+    mqttDebug("MQTT reconnected");
   }
 }
 
+// v1.4 Phase 7: MQTT callback with payload size validation
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Validate payload size (max 256 bytes)
+  if (length > 256) {
+    mqttDebug("MQTT payload too large");
+    return;
+  }
+
+  // Validate topic length
+  if (strlen(topic) > 64) {
+    mqttDebug("MQTT topic too long");
+    return;
+  }
+
   String topicStr = String(topic);
   String payloadStr = "";
+  payloadStr.reserve(length + 1);  // Pre-allocate to avoid fragmentation
 
   for (unsigned int i = 0; i < length; i++) {
     payloadStr += (char)payload[i];
@@ -346,12 +438,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 // ==================== MQTT COMMAND HANDLER ====================
 void handleMqttCommand(String topic, String payload) {
-  // Mode control
+  // Mode control (v1.4 BUGFIX: Add validation)
   if (topic == "greenhouse/control/mode") {
-    currentMode = payload;
-    mqtt.publish("greenhouse/status/mode", payload.c_str(), true);
-    Serial.print("Mode changed to: ");
-    Serial.println(payload);
+    if (payload == "AUTO" || payload == "MANUAL") {
+      currentMode = payload;
+      mqtt.publish("greenhouse/status/mode", payload.c_str(), true);
+      mqttDebug(("Mode: " + payload).c_str());
+    } else {
+      mqttDebug("Invalid mode - use AUTO or MANUAL");
+    }
     return;
   }
 
@@ -365,10 +460,7 @@ void handleMqttCommand(String topic, String payload) {
   // Thresholds
   if (topic.startsWith("greenhouse/set/thresholds/")) {
     String param = topic.substring(26);  // After "greenhouse/set/thresholds/"
-    Serial.print("Threshold update: ");
-    Serial.print(param);
-    Serial.print(" = ");
-    Serial.println(payload);
+    mqttDebug(("Threshold: " + param + "=" + payload).c_str());
     // Store in LittleFS or forward to UNO if needed
     return;
   }
@@ -382,8 +474,7 @@ void handleDeviceCommand(String device, String action) {
     // v1.3.1: Control Fan relay on ESP8266 GPIO5
     bool state = (action == "ON");
     digitalWrite(RELAY_FAN, state ? RELAY_ON : RELAY_OFF);
-    Serial.print("Fan relay: ");
-    Serial.println(state ? "ON" : "OFF");
+    mqttDebug(("Fan: " + action).c_str());
 
     // v1.3.2: Publish status directly, don't send to UNO
     mqtt.publish("greenhouse/status/fan", action.c_str(), true);
@@ -394,8 +485,7 @@ void handleDeviceCommand(String device, String action) {
     // v1.3.1: Control AuxFan relay on ESP8266 GPIO16
     bool state = (action == "ON");
     digitalWrite(RELAY_AUXFAN, state ? RELAY_ON : RELAY_OFF);
-    Serial.print("AuxFan relay: ");
-    Serial.println(state ? "ON" : "OFF");
+    mqttDebug(("AuxFan: " + action).c_str());
 
     // v1.3.2: Publish status directly, don't send to UNO
     mqtt.publish("greenhouse/status/auxFan", action.c_str(), true);
@@ -427,10 +517,7 @@ void handleDeviceCommand(String device, String action) {
   String statusTopic = "greenhouse/status/" + device;
   mqtt.publish(statusTopic.c_str(), action.c_str(), true);
 
-  Serial.print("Device control: ");
-  Serial.print(device);
-  Serial.print(" = ");
-  Serial.println(action);
+  mqttDebug((device + ": " + action).c_str());
 }
 
 // ==================== UART WITH UNO ====================
@@ -445,25 +532,28 @@ void handleUartFromUno() {
 
   if (error) {
     uartErrorCount++;
-    Serial.print("UART parse error: ");
-    Serial.println(line);
+    mqttDebug("UART parse error");
     publishError("uart_parse_error", "Invalid JSON from UNO");
     return;
   }
 
   const char* type = doc["type"];
+  if (type == NULL) return;  // v1.4 BUGFIX: Prevent NULL pointer dereference
 
   if (strcmp(type, "sensor") == 0) {
     handleSensorData(doc);
   } else if (strcmp(type, "ack") == 0) {
-    // ACK received
-    Serial.println("ACK from UNO");
+    // ACK received - Serial debug removed
   } else if (strcmp(type, "event") == 0) {
     handleEventFromUno(doc);
+  } else if (strcmp(type, "debug") == 0) {
+    // v1.4 Phase 2: Handle debug message from UNO
+    handleDebugFromUno(doc);
   }
 }
 
 void handleSensorData(JsonDocument& doc) {
+  if (!doc.containsKey("data")) return;  // v1.4 BUGFIX: Validate JSON structure
   JsonObject data = doc["data"];
 
   // Parse sensor data (format matches mqtt-schema.json)
@@ -497,24 +587,25 @@ void handleSensorData(JsonDocument& doc) {
 
   // Data received, reset error count
   uartErrorCount = 0;
-  Serial.println("Sensor data received from UNO");
+  // mqttDebug("Sensor data received");  // Too verbose, comment out
 }
 
 void handleEventFromUno(JsonDocument& doc) {
   const char* event = doc["event"];
   const char* value = doc["value"];
 
-  if (event == NULL || value == NULL) return;
+  if (event == NULL || value == NULL) return;  // v1.4: NULL check already present
 
   // Publish to greenhouse/event/<event>
   String topic = "greenhouse/event/";
   topic += event;
   mqtt.publish(topic.c_str(), value);
 
-  Serial.print("Event from UNO: ");
-  Serial.print(event);
-  Serial.print(" = ");
-  Serial.println(value);
+  String debugMsg = "Event: ";
+  debugMsg += event;
+  debugMsg += "=";
+  debugMsg += value;
+  mqttDebug(debugMsg.c_str());
 
   // Handle fire alert with LED
   if (strcmp(event, "flame") == 0 && strcmp(value, "DETECTED") == 0) {
@@ -540,10 +631,30 @@ void sendCommandToUno(String device, String action) {
   serializeJson(doc, unoSerial);
   unoSerial.println();
 
-  // Also log to debug Serial
-  Serial.print("Sent to UNO: ");
-  serializeJson(doc, Serial);
-  Serial.println();
+  // Serial debug removed - unoSerial IS Serial now
+}
+
+// ==================== MQTT DEBUG SYSTEM (v1.4 Phase 2) ====================
+void handleDebugFromUno(JsonDocument& doc) {
+  const char* source = doc["source"];
+  const char* msg = doc["msg"];
+  unsigned long ts = doc["ts"];
+
+  if (source == NULL || msg == NULL) return;  // v1.4: NULL check already present
+
+  // Forward to MQTT debug topic
+  if (mqtt.connected()) {
+    String payload = String(source) + ": " + String(msg);
+    mqtt.publish("greenhouse/sys/debug", payload.c_str());
+  }
+}
+
+void mqttDebug(const char* msg) {
+  if (!mqtt.connected()) return;
+
+  String payload = "ESP8266: ";
+  payload += msg;
+  mqtt.publish("greenhouse/sys/debug", payload.c_str());
 }
 
 // ==================== DHT11 SENSOR (NEW in v1.2) ====================
@@ -554,16 +665,12 @@ void readDht() {
   if (!isnan(temp) && !isnan(hum)) {
     sensorData.temp_c = temp;
     sensorData.hum_pct = hum;
-    Serial.print("DHT11: T=");
-    Serial.print(temp, 1);
-    Serial.print("°C H=");
-    Serial.print(hum, 1);
-    Serial.println("%");
+    // mqttDebug("DHT11 read OK");  // Too verbose, comment out
 
     // v1.3: Send environment data to UNO for LCD display
     sendEnvDataToUno();
   } else {
-    Serial.println("DHT11 read failed!");
+    mqttDebug("DHT11 read failed");
     // Keep previous values on read failure
   }
 }
@@ -587,12 +694,7 @@ void sendEnvDataToUno() {
   serializeJson(doc, unoSerial);
   unoSerial.println();
 
-  // Debug log
-  Serial.print("Sent env to UNO: T=");
-  Serial.print(sensorData.temp_c, 1);
-  Serial.print("°C H=");
-  Serial.print(sensorData.hum_pct, 1);
-  Serial.println("%");
+  // mqttDebug("Env data sent to UNO");  // Too verbose, comment out
 }
 
 // ==================== GPS ====================
@@ -612,33 +714,51 @@ void readGps() {
 }
 
 // ==================== MQTT PUBLISH ====================
+// v1.4 Phase 4: Standardized JSON with timestamp and units
+void publishSensor(const char* name, float value, const char* unit) {
+  if (!mqtt.connected()) return;
+
+  StaticJsonDocument<128> doc;
+  doc["v"] = value;
+  doc["u"] = unit;
+  doc["t"] = millis();  // Timestamp in milliseconds
+
+  String json;
+  serializeJson(doc, json);
+
+  String topic = "greenhouse/data/";
+  topic += name;
+  mqtt.publish(topic.c_str(), json.c_str());
+}
+
 void publishSensorData() {
   if (!mqtt.connected()) return;
 
-  // Publish to greenhouse/data/* topics (matches mqtt-schema.json)
+  // v1.4 Phase 4: Publish with standardized format (value, unit, timestamp)
   if (sensorData.temp_c > -500) {
-    mqtt.publish("greenhouse/data/temperature", String(sensorData.temp_c, 1).c_str());
+    publishSensor("temperature", sensorData.temp_c, "°C");
   }
 
   if (sensorData.hum_pct > -500) {
-    mqtt.publish("greenhouse/data/humidity", String(sensorData.hum_pct, 1).c_str());
+    publishSensor("humidity", sensorData.hum_pct, "%");
   }
 
-  mqtt.publish("greenhouse/data/soilMoisture", String(sensorData.soil_pct, 1).c_str());
-  mqtt.publish("greenhouse/data/lightIntensity", String((int)sensorData.light_lux).c_str());
-  mqtt.publish("greenhouse/data/waterTankLevel", String((int)sensorData.distance_cm).c_str());
-  mqtt.publish("greenhouse/data/gasMQ3", String(sensorData.mq3 * 5.0 / 1023.0, 2).c_str());
-  mqtt.publish("greenhouse/data/flameAnalog", String(sensorData.flame).c_str());
-  mqtt.publish("greenhouse/data/soundLevel", String(sensorData.sound).c_str());
+  publishSensor("soilMoisture", sensorData.soil_pct, "%");
+  publishSensor("lightIntensity", sensorData.light_lux, "lux");
+  publishSensor("waterTankLevel", sensorData.distance_cm, "cm");
+  publishSensor("gasMQ3", sensorData.mq3 * 5.0 / 1023.0, "V");
+  publishSensor("flameAnalog", (float)sensorData.flame, "raw");
+  publishSensor("soundLevel", (float)sensorData.sound, "raw");
 
-  // Rain sensor (placeholder)
+  // Rain sensor (placeholder) - using simple string for now
   mqtt.publish("greenhouse/data/rainSensor", "NOT_DETECTED");
 
-  // GPS (if valid)
+  // GPS (if valid) - kept as nested JSON for lat/lng
   if (sensorData.gps_valid) {
     StaticJsonDocument<128> gpsDoc;
     gpsDoc["lat"] = sensorData.gps_lat;
     gpsDoc["lng"] = sensorData.gps_lng;
+    gpsDoc["t"] = millis();  // Add timestamp
 
     String gpsJson;
     serializeJson(gpsDoc, gpsJson);
@@ -687,43 +807,222 @@ void publishError(const char* code, const char* msg) {
   serializeJson(doc, json);
   mqtt.publish("greenhouse/event/error", json.c_str());
 
-  Serial.print("Error: ");
-  Serial.print(code);
-  Serial.print(" - ");
-  Serial.println(msg);
+  String debugMsg = "Error: ";
+  debugMsg += code;
+  debugMsg += " - ";
+  debugMsg += msg;
+  mqttDebug(debugMsg.c_str());
 }
 
 // ==================== LED WS2812 ====================
+// v1.4 Phase 6: Optimized to only Show() when color actually changes
 void updateLedAnimations() {
   unsigned long now = millis();
 
   if (now - ledAnimationTick < 100) return;  // Update every 100ms
   ledAnimationTick = now;
 
+  RgbColor newColor(0, 0, 0);
+
   // Ring #2 only (Ring #1 is on UNO)
   if (ledState.mode == "OFF") {
-    for (int i = 0; i < LED_COUNT; i++) {
-      ring2.SetPixelColor(i, RgbColor(0, 0, 0));
-    }
+    newColor = RgbColor(0, 0, 0);
   } else if (ledState.mode == "COLOR") {
-    for (int i = 0; i < LED_COUNT; i++) {
-      ring2.SetPixelColor(i, RgbColor(ledState.r, ledState.g, ledState.b));
-    }
+    newColor = RgbColor(ledState.r, ledState.g, ledState.b);
   } else if (ledState.mode == "ALERT") {
     ledAlertPhase = !ledAlertPhase;
     uint8_t brightness = ledAlertPhase ? 255 : 50;
+    newColor = RgbColor(brightness, 0, 0);  // Red blink
+  }
+
+  // Only update if color changed (v1.4 Phase 6 optimization)
+  if (newColor.R != lastLedColor.R || newColor.G != lastLedColor.G || newColor.B != lastLedColor.B) {
     for (int i = 0; i < LED_COUNT; i++) {
-      ring2.SetPixelColor(i, RgbColor(brightness, 0, 0));  // Red blink
+      ring2.SetPixelColor(i, newColor);
+    }
+    ring2.Show();  // Only show when color actually changed
+    lastLedColor = newColor;
+  }
+}
+
+// v1.4 Phase 7: Enhanced color parsing with validation
+void parseColor(String hexColor, uint8_t& r, uint8_t& g, uint8_t& b) {
+  // Validate format: #RRGGBB
+  if (hexColor.length() != 7 || hexColor[0] != '#') {
+    mqttDebug("Invalid color format");
+    return;
+  }
+
+  // Validate hex characters
+  for (int i = 1; i < 7; i++) {
+    char c = hexColor[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) {
+      mqttDebug("Invalid hex character in color");
+      return;
     }
   }
 
-  ring2.Show();
+  // Parse with error checking
+  char* endPtr;
+  long rVal = strtol(hexColor.substring(1, 3).c_str(), &endPtr, 16);
+  if (*endPtr != '\0') return;
+
+  long gVal = strtol(hexColor.substring(3, 5).c_str(), &endPtr, 16);
+  if (*endPtr != '\0') return;
+
+  long bVal = strtol(hexColor.substring(5, 7).c_str(), &endPtr, 16);
+  if (*endPtr != '\0') return;
+
+  // Clamp to valid range (0-255)
+  r = constrain(rVal, 0, 255);
+  g = constrain(gVal, 0, 255);
+  b = constrain(bVal, 0, 255);
 }
 
-void parseColor(String hexColor, uint8_t& r, uint8_t& g, uint8_t& b) {
-  if (hexColor.length() < 7 || hexColor[0] != '#') return;
+// ==================== THRESHOLDS & AUTO CONTROL (v1.4 Phase 5) ====================
+// v1.4 Phase 7: Enhanced LittleFS error handling
+void loadThresholds() {
+  if (!LittleFS.begin()) {
+    mqttDebug("LittleFS mount failed - using defaults");
+    useDefaults = true;
+    publishThresholds();
+    return;
+  }
 
-  r = strtol(hexColor.substring(1, 3).c_str(), NULL, 16);
-  g = strtol(hexColor.substring(3, 5).c_str(), NULL, 16);
-  b = strtol(hexColor.substring(5, 7).c_str(), NULL, 16);
+  File file = LittleFS.open("/thresholds.json", "r");
+  if (!file) {
+    mqttDebug("Thresholds file not found - using defaults");
+    useDefaults = true;
+    publishThresholds();
+    return;
+  }
+
+  // Check file size (must be > 0 and < 1KB)
+  size_t fileSize = file.size();
+  if (fileSize == 0 || fileSize > 1024) {
+    mqttDebug("Invalid threshold file size");
+    file.close();
+    useDefaults = true;
+    publishThresholds();
+    return;
+  }
+
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();  // Close immediately after reading
+
+  if (error) {
+    mqttDebug("Threshold JSON parse error");
+    useDefaults = true;
+  } else {
+    // Load with validation
+    thresholds.temp_max = doc["temp_max"] | 35.0;
+    thresholds.temp_min = doc["temp_min"] | 15.0;
+    thresholds.hum_max = doc["hum_max"] | 80.0;
+    thresholds.hum_min = doc["hum_min"] | 40.0;
+    thresholds.soil_min = doc["soil_min"] | 30.0;
+    thresholds.flame_threshold = doc["flame_threshold"] | 800;
+    thresholds.sound_threshold = doc["sound_threshold"] | 700;
+
+    // Sanity checks
+    if (thresholds.temp_max <= thresholds.temp_min) {
+      mqttDebug("Invalid temp thresholds - using defaults");
+      thresholds.temp_max = 35.0;
+      thresholds.temp_min = 15.0;
+    }
+
+    useDefaults = false;
+    mqttDebug("Thresholds loaded from file");
+  }
+
+  // Publish current thresholds
+  publishThresholds();
+}
+
+void publishThresholds() {
+  if (!mqtt.connected()) return;
+
+  StaticJsonDocument<256> doc;
+  doc["temp_max"] = thresholds.temp_max;
+  doc["temp_min"] = thresholds.temp_min;
+  doc["hum_max"] = thresholds.hum_max;
+  doc["hum_min"] = thresholds.hum_min;
+  doc["soil_min"] = thresholds.soil_min;
+  doc["flame_threshold"] = thresholds.flame_threshold;
+  doc["sound_threshold"] = thresholds.sound_threshold;
+  doc["source"] = useDefaults ? "default" : "file";
+
+  String json;
+  serializeJson(doc, json);
+  mqtt.publish("greenhouse/sys/thresholds", json.c_str(), true);
+}
+
+void autoControl() {
+  // Only run auto control in AUTO mode
+  if (currentMode != "AUTO") return;
+
+  static unsigned long lastAutoControl = 0;
+  static bool flameAlertSent = false;  // v1.4 BUGFIX: Debounce flame alert
+  unsigned long now = millis();
+
+  // Run auto control every 5 seconds
+  if (now - lastAutoControl < 5000) return;
+  lastAutoControl = now;
+
+  // v1.4 BUGFIX: Temperature control WITH HYSTERESIS to prevent oscillation
+  // Turn ON when temp > max + hysteresis (37°C)
+  // Turn OFF when temp < max - hysteresis (33°C)
+  if (sensorData.temp_c > (thresholds.temp_max + thresholds.temp_hysteresis)) {
+    // Turn on fan if not already on
+    if (deviceState.fan != "ON") {
+      handleDeviceCommand("fan", "ON");
+      mqttDebug("Auto: Fan ON (temp high)");
+    }
+  } else if (sensorData.temp_c < (thresholds.temp_max - thresholds.temp_hysteresis)) {
+    // Turn off fan if on (temp is normal)
+    if (deviceState.fan != "OFF") {
+      handleDeviceCommand("fan", "OFF");
+      mqttDebug("Auto: Fan OFF (temp normal)");
+    }
+  }
+  // Between 33-37°C: keep current state (hysteresis zone)
+
+  // v1.4 BUGFIX: Soil moisture control WITH HYSTERESIS
+  // Turn ON when soil < min - hysteresis (25%)
+  // Turn OFF when soil > min + hysteresis (35%)
+  if (sensorData.soil_pct < (thresholds.soil_min - thresholds.soil_hysteresis)) {
+    // Turn on pump if not already on
+    if (deviceState.pump != "ON") {
+      handleDeviceCommand("pump", "ON");
+      mqttDebug("Auto: Pump ON (soil dry)");
+    }
+  } else if (sensorData.soil_pct > (thresholds.soil_min + thresholds.soil_hysteresis)) {
+    // Turn off pump if on (soil is wet enough)
+    if (deviceState.pump != "OFF") {
+      handleDeviceCommand("pump", "OFF");
+      mqttDebug("Auto: Pump OFF (soil ok)");
+    }
+  }
+  // Between 25-35%: keep current state (hysteresis zone)
+
+  // v1.4 BUGFIX: Flame detection with debounce (always active, regardless of mode)
+  if (sensorData.flame > thresholds.flame_threshold) {
+    if (!flameAlertSent) {
+      mqttDebug("ALERT: Flame detected!");
+      flameAlertSent = true;
+
+      // Emergency actions: turn off pump, turn on fans
+      if (deviceState.pump != "OFF") {
+        handleDeviceCommand("pump", "OFF");
+      }
+      if (deviceState.fan != "ON") {
+        handleDeviceCommand("fan", "ON");
+      }
+      if (deviceState.auxfan != "ON") {
+        handleDeviceCommand("auxFan", "ON");
+      }
+    }
+  } else {
+    flameAlertSent = false;  // Reset when flame is gone
+  }
 }

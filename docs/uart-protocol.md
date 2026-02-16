@@ -1,27 +1,45 @@
-# UART Protocol (UNO ↔ ESP8266)
+# UART Protocol (UNO ↔ ESP8266) - v1.4 HARDWARE SERIAL
 
 ## Connection Specifications
 
 | Parameter | Value |
 |-----------|-------|
-| Baud Rate | 57600 bps |
+| **Version** | **v1.4 COMPREHENSIVE OVERHAUL** |
+| **Connection** | **Hardware Serial D0/D1 (UNO) ↔ GPIO1/3 (ESP8266)** |
+| Baud Rate | **115200 bps** (v1.4: increased from 57600) |
 | Data Bits | 8 |
 | Parity | None |
 | Stop Bits | 1 |
 | Flow Control | None (8N1) |
 | Format | JSON, newline-delimited (`\n`) |
-| Voltage | **UNO TX (5V) → ESP8266 RX (3.3V)**: NEEDS level shifter! |
-| | **ESP8266 TX (3.3V) → UNO RX (5V)**: OK, no shifter needed |
+| Voltage | **UNO D1/TX (5V) → ESP8266 GPIO3/RX (3.3V)**: NEEDS level shifter! |
+| | **ESP8266 GPIO1/TX (3.3V) → UNO D0/RX (5V)**: OK, no shifter needed |
 
-## Level Shifter Circuit
+## ⚠️ CRITICAL v1.4 UPLOAD WARNING
+
+**Hardware Serial uses D0/D1 (UNO) and GPIO1/3 (ESP8266) - same pins used for USB programming!**
+
+**MUST DISCONNECT** these pins during firmware upload:
+- **UNO**: Disconnect D0 and D1 from level shifter
+- **ESP8266**: Disconnect GPIO1 (TX) and GPIO3 (RX) from level shifter
+
+**RECONNECT** after upload completes.
+
+See [V1.4_USAGE_GUIDE.md](../V1.4_USAGE_GUIDE.md) for detailed upload procedure.
+
+## Level Shifter Circuit (v1.4)
 
 ```
-UNO TX (5V) ──┬── 1kΩ ──┬── ESP8266 RX (3.3V)
-              │         │
-              └─ 2kΩ ───┴── GND
+UNO D1 (TX, 5V) ──┬── 1kΩ ──┬── ESP8266 GPIO3 (RX, 3.3V)
+                  │         │
+                  └─ 2kΩ ───┴── GND
 
 Output voltage: 5V × (2kΩ / 3kΩ) = 3.33V ✓
 ```
+
+**Alternative**: Use bidirectional level shifter module (e.g., TXS0108E) for more reliable connection.
+
+See [V1.4_WIRING_GUIDE.md](../V1.4_WIRING_GUIDE.md) for complete wiring instructions.
 
 ## Message Types
 
@@ -157,6 +175,70 @@ Output voltage: 5V × (2kΩ / 3kΩ) = 3.33V ✓
 **Behavior**:
 - ESP8266 publishes alert to MQTT
 - App can trigger DFPlayer warning
+
+---
+
+### 5. Debug Message (UNO → ESP8266) - NEW in v1.4 Phase 2
+
+**Direction**: UNO → ESP8266
+
+**Trigger**: Debug logging from UNO (replaces Serial.print debug)
+
+**Format**:
+```json
+{
+  "type": "debug",
+  "source": "UNO",
+  "msg": "BH1750 init OK",
+  "ts": 12345
+}
+```
+
+**Fields**:
+- `type`: Always `"debug"`
+- `source`: Always `"UNO"` (identifies sender)
+- `msg`: Debug message string
+- `ts`: Timestamp (millis())
+
+**Behavior**:
+- ESP8266 forwards to MQTT topic `greenhouse/sys/debug`
+- Used for remote debugging since Hardware Serial is occupied
+
+**v1.4 Note**: Hardware Serial now used for UNO communication, so traditional `Serial.println()` debug is not available. Use MQTT debug instead.
+
+---
+
+### 6. Environment Data (ESP8266 → UNO) - NEW in v1.3/v1.4
+
+**Direction**: ESP8266 → UNO
+
+**Trigger**: After ESP8266 reads DHT11 and GPS (every 2-3 seconds)
+
+**Format**:
+```json
+{
+  "type": "env",
+  "temp": "25.3",
+  "hum": "65.2",
+  "gps_lat": "10.762622",
+  "gps_lng": "106.660172",
+  "gps_valid": true
+}
+```
+
+**Fields**:
+- `type`: Always `"env"`
+- `temp`: Temperature (°C) as string
+- `hum`: Humidity (%) as string
+- `gps_lat`: GPS latitude as string (if valid)
+- `gps_lng`: GPS longitude as string (if valid)
+- `gps_valid`: Boolean, true if GPS has fix
+
+**Behavior**:
+- UNO receives and displays on LCD multi-screen rotation
+- Enables UNO to show ALL sensor data even though DHT11 is on ESP8266
+
+**v1.2/v1.4 Note**: DHT11 moved from UNO to ESP8266 GPIO4 to resolve pin conflict on UNO D13.
 
 ---
 
@@ -376,48 +458,37 @@ UNO                           ESP8266
 
 ## Testing UART Communication
 
-### Test 1: Loopback
+### Test 1: Loopback (v1.4)
 
-Connect UNO TX to UNO RX directly (no ESP8266):
+⚠️ **Cannot test loopback directly** - Hardware Serial is used for USB programming. Test with ESP8266 connected.
 
-```cpp
-void setup() {
-  Serial.begin(57600);
-}
-
-void loop() {
-  if (Serial.available()) {
-    char c = Serial.read();
-    Serial.print(c);  // Echo back
-  }
-}
-```
-
-Type in Serial Monitor, should see echo.
-
-### Test 2: Send from UNO, Monitor on ESP8266
+### Test 2: Send from UNO, Monitor on ESP8266 (v1.4)
 
 UNO code:
 ```cpp
 void loop() {
-  Serial.println("{\"type\":\"sensor\",\"ts\":123,\"payload\":{\"temp_c\":25.5}}");
+  Serial.println("{\"type\":\"sensor\",\"ts\":123,\"data\":{\"light\":\"120\",\"soil\":\"45\"}}");
   delay(3000);
 }
 ```
 
-ESP8266 Serial Monitor (57600 baud): Should see JSON messages.
+ESP8266 Serial Monitor (115200 baud): Should see JSON messages.
 
-### Test 3: Send from ESP8266, Monitor on UNO
+**Note**: Disconnect D0/D1 to upload UNO code, then reconnect.
+
+### Test 3: Send from ESP8266, Monitor on UNO (v1.4)
 
 ESP8266 code:
 ```cpp
 void loop() {
-  Serial.println("{\"type\":\"set\",\"ts\":123,\"req_id\":1,\"payload\":{\"pump\":1}}");
+  Serial.println("{\"type\":\"control\",\"device\":\"pump\",\"action\":\"ON\"}");
   delay(5000);
 }
 ```
 
-UNO Serial Monitor (57600 baud): Should see JSON commands.
+UNO Serial Monitor (115200 baud): Should see JSON commands.
+
+**Note**: Disconnect GPIO1/GPIO3 to upload ESP8266 code, then reconnect.
 
 ### Test 4: Full Bidirectional
 
@@ -425,14 +496,15 @@ Upload both firmwares, monitor MQTT topics to verify data flow.
 
 ---
 
-## Troubleshooting
+## Troubleshooting (v1.4)
 
 ### No data received
 
-1. Check baud rate: **57600** on both sides
-2. Check wiring: TX ↔ RX (crossed)
-3. Check GND common
-4. Check level shifter voltage (should be ~3.3V)
+1. Check baud rate: **115200** on both sides (v1.4 changed from 57600)
+2. Check wiring: D1 → GPIO3, GPIO1 → D0 (through level shifter)
+3. Check GND common between UNO and ESP8266
+4. Check level shifter voltage (should be ~3.3V at ESP8266 side)
+5. **Verify D0/D1 and GPIO1/GPIO3 are connected** (not still disconnected from upload)
 
 ### Garbage characters
 
@@ -462,4 +534,5 @@ Upload both firmwares, monitor MQTT topics to verify data flow.
 
 ---
 
-**Last updated**: 2025-01-22
+**Version**: v1.4 COMPREHENSIVE OVERHAUL
+**Last updated**: 2025-11-22
